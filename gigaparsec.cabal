@@ -1,4 +1,4 @@
-cabal-version:   3.8
+cabal-version:   3.0
 name:            gigaparsec
 version:         0.1.0.0
 license:         GPL-3.0-or-later
@@ -7,20 +7,37 @@ author:          jaro.reinders@gmail.com
 maintainer:      Jaro Reinders
 build-type:      Simple
 extra-doc-files: CHANGELOG.md
+synopsis:        Leightweight generalized parser combinators
+category:        Parsing
+description:
+    Gigaparsec (Gpc) is a library providing generalized parser combinators (Gpc)
+    which are able to parse all context-free grammars completely. This includes
+    support for left-recursion and reporting all possible parses of ambiguous
+    grammars.
 
-common warnings
-    ghc-options: -Wall
+    Gigaparsec is currently only a proof of concept. Of course it needs a much more
+    elaborate API, but before that I want to implement disambiguation strategies.
+    I have also not put any effort in making this library performant yet.
+
+source-repository head
+  type:     git
+  location: https://github.com/noughtmare/gigaparsec
+
+common common
+    build-depends:            base >= 4.14 && <5
+    ghc-options:              -Wall
+    default-language:         Haskell2010
 
 library
-    import:           warnings
+    import:           common
     exposed-modules:          Gigaparsec
     hs-source-dirs:           src
-    build-depends:    base, containers, lattices, data-reify, row-types, recover-rtti
-    default-language: Haskell2010
+    build-depends:    containers ^>= 0.6,
+                      data-reify ^>= 0.6,
+--                       recover-rtti,
 
 executable gigaparsec-examples
-    import:           warnings
+    import:           common
     main-is:          Main.hs
     hs-source-dirs:           examples
-    build-depends:    base, gigaparsec, containers, lattices, data-reify, row-types, recover-rtti
-    default-language: Haskell2010
+    build-depends:    gigaparsec
