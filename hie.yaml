@@ -1,0 +1,8 @@
+cradle:
+  cabal:
+    - path: "src/"
+      component: "lib:gigaparsec"
+    - path: "examples/"
+      component: "exe:gigaparsec-examples"
+    - path: "experiments/"
+      component: "exe:gigaparsec-experiments"
