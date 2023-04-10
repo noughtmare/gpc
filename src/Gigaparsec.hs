@@ -24,45 +24,38 @@ import System.IO.Unsafe (unsafePerformIO)
 -- import Debug.RecoverRTTI ( anythingToString )
 import Data.Maybe (fromMaybe)
 
-data ActionF a f = AscendF a | MatchF Char (ActionF a f) | forall b. DescendF f (ActionF (b -> a) f) | FailF | ChooseF (ActionF a f) (ActionF a f)
+data ActionF a f = AscendF a | MatchF Char (ActionF a f) | forall b. DescendF f (ActionF (b -> a) f)
 instance Show f => Show (ActionF a f) where
     show AscendF{} = "AscendF"
     show (MatchF c xs) = "(MatchF "  ++ show c ++ " " ++ show xs ++ ")"
     show (DescendF x xs) = "(DescendF " ++ show x ++ " " ++ show xs ++ ")"
-    show FailF = "FailF"
-    show ChooseF{} = "ChooseF"
 data ListF a f = Nil | Cons (a f) (ListF a f) deriving Show
 
-data Action' n a = Ascend' a | Match' Char (Action' n a) | forall b. Descend' (Actions n b) (Action' n (b -> a)) | Fail' | Choose' (Action' n a) (Action' n a)
-deriving instance Functor (Action' n)
-newtype Actions n a = Actions [Action' n a]
+data Action' a = Ascend' a | Match' Char (Action' a) | forall b. Descend' (Actions b) (Action' (b -> a))
+deriving instance Functor Action'
+newtype Actions a = Actions [Action' a]
     deriving (Functor)
-    deriving (Applicative, Alternative) via (Compose [] (Action' n))
+    deriving (Applicative, Alternative) via (Compose [] Action')
 
-instance Applicative (Action' n) where
+instance Applicative Action' where
     pure = Ascend'
     Ascend' f <*> x = fmap f x
     Match' c k1 <*> k2 = Match' c (k1 <*> k2)
     Descend' n k1 <*> k2 = Descend' n (flip <$> k1 <*> k2)
-    Fail' <*> _ = Fail'
-    Choose' x y <*> z = Choose' (x <*> z) (y <*> z)
 
-
-instance MuRef (Actions n a) where
-    type DeRef (Actions n a) = ListF (ActionF Any)
-    mapDeRef :: forall f u. Applicative f => (forall b. (MuRef b, DeRef (Actions n a) ~ DeRef b) => b -> f u) -> Actions n a -> f (DeRef (Actions n a) u)
+instance MuRef (Actions a) where
+    type DeRef (Actions a) = ListF (ActionF Any)
+    mapDeRef :: forall f u. Applicative f => (forall b. (MuRef b, DeRef (Actions a) ~ DeRef b) => b -> f u) -> Actions a -> f (DeRef (Actions a) u)
     mapDeRef _ (Actions []) = pure Nil
     mapDeRef f (Actions (x:xs)) = Cons <$> helper x <*> mapDeRef f (Actions xs) where
-        helper :: forall b. Action' n b -> f (ActionF Any u)
+        helper :: forall b. Action' b -> f (ActionF Any u)
         helper (Ascend' a) = pure (AscendF (unsafeCoerce a))
         helper (Match' c r) = MatchF c <$> helper r
         helper (Descend' y r) = DescendF <$> f y <*> unsafeCoerce (helper r)
-        helper Fail' = pure FailF
-        helper (Choose' l r) = ChooseF <$> helper l <*> helper r
 
 newtype Name n a = Name n deriving Show
 
-reify :: Actions Unique a -> (G Unique, Name Unique a)
+reify :: Actions a -> (G Unique, Name Unique a)
 reify acts = (G (Map.fromList [ (u, f x') | (u, x') <- xs ]), Name x) where
     (Graph xs x) = unsafePerformIO $ reifyGraph acts
 
@@ -74,8 +67,6 @@ reify acts = (G (Map.fromList [ (u, f x') | (u, x') <- xs ]), Name x) where
     g (AscendF r) = [Ascend r]
     g (MatchF c r) = Match c <$> g r
     g (DescendF u r) = Descend (Name u) <$> g r
-    g FailF = []
-    g (ChooseF l r) = g l ++ g r
 
 data Action n a = Ascend a | Match Char (Action n a) | forall b. Descend (Name n b) (Action n (b -> a))
 deriving instance Functor (Action n)
@@ -94,7 +85,7 @@ newtype G n = G (Map n [Action n Any])
 lookupG :: forall n a. Ord n => G n -> Name n a -> [Action n a]
 lookupG (G m) (Name n) = unsafeCoerce (m Map.! n)
 
-nt :: Actions n a -> Actions n a
+nt :: Actions a -> Actions a
 nt xs = Actions [Descend' xs (pure id)]
 
 compareName :: Ord n => Name n a -> Name n b -> Ordering
@@ -180,7 +171,7 @@ decode ds0 = lookupM where
     go (Dep n l r xs) fs = go xs $ fs <*> lookupM n l r
 
 
-char :: Char -> Actions n Char
+char :: Char -> Actions Char
 char c = Actions [Match' c (pure c)]
 
-type Parser a = Actions Unique a
+type Parser a = Actions a
