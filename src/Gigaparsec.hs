@@ -8,7 +8,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DerivingVia #-}
 
-module Gigaparsec where
+module Gigaparsec ( Parser, reify, nt, parse, decode, char ) where
 
 import qualified Data.Set as Set
 import Data.Set (Set)
