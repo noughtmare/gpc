@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -16,15 +15,13 @@ import Data.Set (Set)
 import qualified Data.Map as Map
 import Data.Map (Map)
 import Data.List (intercalate)
+import Control.Applicative (Alternative)
 import Unsafe.Coerce ( unsafeCoerce )
-import Control.Applicative ( asum, Alternative((<|>)) )
 import Data.Functor.Compose ( Compose(Compose) )
-import Control.Monad ( void )
 import Data.Reify ( reifyGraph, MuRef(..), Graph(Graph), Unique )
 import GHC.Exts (Any)
 import System.IO.Unsafe (unsafePerformIO)
 -- import Debug.RecoverRTTI ( anythingToString )
-import Data.Char (intToDigit)
 import Data.Maybe (fromMaybe)
 
 data ActionF a f = AscendF a | MatchF Char (ActionF a f) | forall b. DescendF f (ActionF (b -> a) f) | FailF | ChooseF (ActionF a f) (ActionF a f)
