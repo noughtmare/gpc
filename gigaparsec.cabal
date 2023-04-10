@@ -11,8 +11,16 @@ extra-doc-files: CHANGELOG.md
 common warnings
     ghc-options: -Wall
 
-executable gigaparsec
+library
+    import:           warnings
+    exposed-modules:          Gigaparsec
+    hs-source-dirs:           src
+    build-depends:    base, containers, lattices, data-reify, row-types, recover-rtti
+    default-language: Haskell2010
+
+executable gigaparsec-examples
     import:           warnings
     main-is:          Main.hs
-    build-depends:    base, containers, lattices, data-reify, row-types, recover-rtti
+    hs-source-dirs:           examples
+    build-depends:    base, gigaparsec, containers, lattices, data-reify, row-types, recover-rtti
     default-language: Haskell2010
