@@ -7,6 +7,8 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE StandaloneKindSignatures #-}
 
 module Gigaparsec ( Parser, reify, nt, parse, decode, char ) where
 
@@ -14,15 +16,14 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 import qualified Data.Map as Map
 import Data.Map (Map)
-import Data.List (intercalate)
 import Control.Applicative (Alternative)
 import Unsafe.Coerce ( unsafeCoerce )
 import Data.Functor.Compose ( Compose(Compose) )
 import Data.Reify ( reifyGraph, MuRef(..), Graph(Graph), Unique )
 import GHC.Exts (Any)
 import System.IO.Unsafe (unsafePerformIO)
--- import Debug.RecoverRTTI ( anythingToString )
 import Data.Maybe (fromMaybe)
+import Data.Kind
 
 data ActionF a f = AscendF a | MatchF Char (ActionF a f) | forall b. DescendF f (ActionF (b -> a) f)
 instance Show f => Show (ActionF a f) where
@@ -31,62 +32,56 @@ instance Show f => Show (ActionF a f) where
     show (DescendF x xs) = "(DescendF " ++ show x ++ " " ++ show xs ++ ")"
 data ListF a f = Nil | Cons (a f) (ListF a f) deriving Show
 
-data Action' a = Ascend' a | Match' Char (Action' a) | forall b. Descend' (Actions b) (Action' (b -> a))
-deriving instance Functor Action'
-newtype Actions a = Actions [Action' a]
-    deriving (Functor)
-    deriving (Applicative, Alternative) via (Compose [] Action')
+data Action m a where
+    Match :: Char -> Action m ()
+    Descend :: m a -> Action m a 
 
-instance Applicative Action' where
-    pure = Ascend'
-    Ascend' f <*> x = fmap f x
-    Match' c k1 <*> k2 = Match' c (k1 <*> k2)
-    Descend' n k1 <*> k2 = Descend' n (flip <$> k1 <*> k2)
+type Alt :: (Type -> Type) -> ((Type -> Type) -> Type -> Type) -> Type -> Type
+newtype Alt m f a = Alt [AltF m f a]
+    deriving (Functor, Applicative, Alternative) via Compose [] (AltF m f)
+type AltF :: (Type -> Type) -> ((Type -> Type) -> Type -> Type) -> Type -> Type
+data AltF m f a = Pure a | forall b. Ap (f m b) (AltF m f (b -> a))
+deriving instance Functor (AltF m f)
+instance Applicative (AltF m f) where
+    pure = Pure
+    Pure f <*> q = fmap f q
+    Ap x p <*> q = Ap x (flip <$> p <*> q)
 
-instance MuRef (Actions a) where
-    type DeRef (Actions a) = ListF (ActionF Any)
-    mapDeRef :: forall f u. Applicative f => (forall b. (MuRef b, DeRef (Actions a) ~ DeRef b) => b -> f u) -> Actions a -> f (DeRef (Actions a) u)
-    mapDeRef _ (Actions []) = pure Nil
-    mapDeRef f (Actions (x:xs)) = Cons <$> helper x <*> mapDeRef f (Actions xs) where
-        helper :: forall b. Action' b -> f (ActionF Any u)
-        helper (Ascend' a) = pure (AscendF (unsafeCoerce a))
-        helper (Match' c r) = MatchF c <$> helper r
-        helper (Descend' y r) = DescendF <$> f y <*> unsafeCoerce (helper r)
+newtype Parser a = Parser (Alt Parser Action a)
+    deriving (Functor, Applicative, Alternative) via Alt Parser Action
+
+instance MuRef (Parser a) where
+    type DeRef (Parser a) = ListF (ActionF Any)
+    mapDeRef :: forall f u. Applicative f => (forall b. (MuRef b, DeRef (Parser a) ~ DeRef b) => b -> f u) -> Parser a -> f (DeRef (Parser a) u)
+    mapDeRef _ (Parser (Alt [])) = pure Nil
+    mapDeRef f (Parser (Alt (x:xs))) = Cons <$> helper x <*> mapDeRef f (Parser (Alt xs)) where
+        helper :: forall b. AltF Parser Action b -> f (ActionF Any u)
+        helper (Pure a) = pure (AscendF (unsafeCoerce a))
+        helper (Ap (Match c) r) = MatchF c <$> helper r
+        helper (Ap (Descend y) r) = DescendF <$> f y <*> unsafeCoerce (helper r)
 
 newtype Name n a = Name n deriving Show
 
-reify :: Actions a -> (G Unique, Name Unique a)
+reify :: Parser a -> (G Unique, Name Unique a)
 reify acts = (G (Map.fromList [ (u, f x') | (u, x') <- xs ]), Name x) where
     (Graph xs x) = unsafePerformIO $ reifyGraph acts
 
-    f :: ListF (ActionF Any) Unique -> [Action Unique Any]
+    f :: ListF (ActionF Any) Unique -> [AltF (Name Unique) Action Any]
     f Nil = []
     f (Cons h t) = g h ++ f t
 
-    g :: forall a. ActionF a Unique -> [Action Unique a]
-    g (AscendF r) = [Ascend r]
-    g (MatchF c r) = Match c <$> g r
-    g (DescendF u r) = Descend (Name u) <$> g r
+    g :: forall a. ActionF a Unique -> [AltF (Name Unique) Action a]
+    g (AscendF r) = [Pure r]
+    g (MatchF c r) = Ap (Match c) . fmap const <$> g r
+    g (DescendF u r) = Ap (Descend (Name u)) <$> g r
 
-data Action n a = Ascend a | Match Char (Action n a) | forall b. Descend (Name n b) (Action n (b -> a))
-deriving instance Functor (Action n)
-instance Applicative (Action n) where
-    pure = Ascend
-    Ascend f <*> x = fmap f x
-    Match c k1 <*> k2 = Match c (k1 <*> k2)
-    Descend n k1 <*> k2 = Descend n (flip <$> k1 <*> k2)
-instance Show n => Show (Action n a) where
-    show (Ascend _) = "Ascend" -- ++ anythingToString x ++ ")"
-    show (Match c _) = "(Match " ++ show c ++ ")"
-    show (Descend (Name n) _) = "(Descend " ++ show n ++ ")"
+newtype G n = G (Map n [AltF (Name n) Action Any])
 
-newtype G n = G (Map n [Action n Any])
-
-lookupG :: forall n a. Ord n => G n -> Name n a -> [Action n a]
+lookupG :: forall n a. Ord n => G n -> Name n a -> [AltF (Name n) Action a]
 lookupG (G m) (Name n) = unsafeCoerce (m Map.! n)
 
-nt :: Actions a -> Actions a
-nt xs = Actions [Descend' xs (pure id)]
+nt :: Parser a -> Parser a
+nt xs = Parser $ Alt [Ap (Descend xs) (pure id)]
 
 compareName :: Ord n => Name n a -> Name n b -> Ordering
 compareName (Name x) (Name y) = compare x y
@@ -102,18 +97,15 @@ data Deps n a b where
     Dep :: Name n b -> Int -> Int -> Deps n a c -> Deps n a (b -> c)
 deriving instance Show n => Show (Deps n a b)
 
-data Slot n a = forall b. Slot !(Name n a) !Int !Int (Deps n a b) (Action n b)
+data Slot n a = forall b. Slot !(Name n a) !Int !Int (Deps n a b) (AltF (Name n) Action b)
 data Descriptor n a = Descriptor (Slot n a) !Int !Int String
 data SomeDescriptor n = forall a. SomeDescriptor (Descriptor n a)
 instance Ord n => Eq (SomeDescriptor n) where
     SomeDescriptor x == SomeDescriptor y = compareDescriptor x y == EQ
 instance Ord n => Ord (SomeDescriptor n) where
     compare (SomeDescriptor x) (SomeDescriptor y) = compareDescriptor x y
-instance Show n => Show (SomeDescriptor n) where
-    show (SomeDescriptor (Descriptor (Slot (Name x) a i deps act) l k _)) =
-        unwords ["<", show x, "::=", "(" ++ show deps ++ ")", show act, intercalate ", " [show a, show i, show l, show k], ">"]
 
-initialDescriptor :: Name n a -> String -> Int -> Action n a -> SomeDescriptor n
+initialDescriptor :: Name n a -> String -> Int -> AltF (Name n) Action a -> SomeDescriptor n
 initialDescriptor n xs i act = SomeDescriptor (Descriptor (Slot n i 0 Self act) 0 0 xs)
 
 newtype WaitForAscend n = WA (Map (n, Int) [Int -> String -> SomeDescriptor n])
@@ -141,16 +133,16 @@ parse :: forall n a. Ord n => (G n, Name n a) -> String -> Set (SomeDescriptor n
 parse (g, z) xs0 = go Set.empty emptyWA emptyWD (zipWith (initialDescriptor z xs0) [0..] (lookupG g z)) where
     go :: Set (SomeDescriptor n) -> WaitForAscend n -> WaitForDescend n -> [SomeDescriptor n] -> Set (SomeDescriptor n)
     go u wa wd (d : rs) | d `Set.member` u = go u wa wd rs
-    go u wa wd (d@(SomeDescriptor (Descriptor (Slot x a i ds (Match c r)) l k xs)) : rs)
-        | c' : xs' <- xs, c == c' = go (Set.insert d u) wa wd (SomeDescriptor (Descriptor (Slot x a (i + 1) ds r) l (k + 1) xs') : rs)
+    go u wa wd (d@(SomeDescriptor (Descriptor (Slot x a i ds (Ap (Match c) r)) l k xs)) : rs)
+        | c' : xs' <- xs, c == c' = go (Set.insert d u) wa wd (SomeDescriptor (Descriptor (Slot x a (i + 1) ds (($ ()) <$> r)) l (k + 1) xs') : rs)
         | otherwise = go u wa wd rs
-    go u wa wd (d@(SomeDescriptor (Descriptor (Slot x a i ds (Descend n next)) l k xs)) : rs)
+    go u wa wd (d@(SomeDescriptor (Descriptor (Slot x a i ds (Ap (Descend n) next)) l k xs)) : rs)
         = go (Set.insert d u) (insertWA n k (\r xs' -> SomeDescriptor (Descriptor (Slot x a (i + 1) (Dep n k r ds) next) l r xs')) wa) wd $ concat
             [ [ SomeDescriptor (Descriptor (Slot n a' 0 Self acts) k k xs) | (a', acts) <- zip [0..] (lookupG g n) ]
             , [ SomeDescriptor (Descriptor (Slot x a (i + 1) (Dep n k r ds) next) l r xs') | (r, xs') <- lookupWD wd n k ]
             , rs
             ]
-    go u wa wd (d@(SomeDescriptor (Descriptor (Slot x _ _ _ (Ascend _)) k r xs)) : rs)
+    go u wa wd (d@(SomeDescriptor (Descriptor (Slot x _ _ _ (Pure _)) k r xs)) : rs)
         = go (Set.insert d u) wa (insertWD x k (r, xs) wd)
             ([ f r xs | f <- lookupWA wa x k ] ++ rs)
     go u _ _ [] = u
@@ -160,7 +152,7 @@ decode ds0 = lookupM where
     m :: Map (n, Int, Int) [Any]
     m = Map.fromListWith (++)
         [ ((x, l, r), map unsafeCoerce (go ds [a]))
-        | SomeDescriptor (Descriptor (Slot (Name x) _ _ ds (Ascend a)) l r _) <- Set.toList ds0
+        | SomeDescriptor (Descriptor (Slot (Name x) _ _ ds (Pure a)) l r _) <- Set.toList ds0
         ]
 
     lookupM :: forall c. Name n c -> Int -> Int -> [c]
@@ -170,8 +162,5 @@ decode ds0 = lookupM where
     go Self x = x
     go (Dep n l r xs) fs = go xs $ fs <*> lookupM n l r
 
-
-char :: Char -> Actions Char
-char c = Actions [Match' c (pure c)]
-
-type Parser a = Actions a
+char :: Char -> Parser Char
+char c = Parser (Alt [Ap (Match c) (pure (const c))])
