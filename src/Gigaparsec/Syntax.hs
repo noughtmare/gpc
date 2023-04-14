@@ -4,7 +4,8 @@
 
 module Gigaparsec.Syntax where
 
-import Gigaparsec.Common
+import Gigaparsec.Core
+
 import GHC.Exts (Any)
 import Control.Applicative
 import Data.Reify
