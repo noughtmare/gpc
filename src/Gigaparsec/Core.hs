@@ -236,6 +236,8 @@ instance OrdF Digit where
 digit :: Digit < f => Alt f Int
 digit = send Digit
 
+-- ergonomics idea: use overloaded labels or template haskell to avoid boilerplate
+
 data Expr a where
     Expr :: Expr Int
 deriving instance Show (Expr a)
@@ -254,10 +256,6 @@ data Many p a where
 data ReplicateM p a where
     ReplicateM :: Int -> p a -> ReplicateM p [a]
 
-onR :: (g a -> h a) -> (f + g) a -> (f + h) a
-onR f (R x) = R (f x)
-onR _ (L x) = L x
-
 infixr +
 infixr <||>
 
@@ -268,11 +266,16 @@ G f <||> G g = G $ \case
 
 type Gram f = G f f
 
+end :: G End a
+end = G (\case)
+
+-- optimization idea: infer follow restrictions from grammar definition
+
 gram :: Gram (Expr + Number + Digit + End)
-gram = G (\Expr -> (+) <$> expr <* match '+' <*> expr  <|> number)
+gram = G (\Expr -> (+) <$> expr <* match '+' <*> expr <|> number)
   <||> G (\Number -> (\x y -> 10 * x + y) <$> number <*> digit <|> digit)
   <||> G (\Digit -> asum [x <$ match (intToDigit x) | x <- [0..9]])
-  <||> G (\case)
+  <||> end
 
 ex1 :: Set (Descriptor (Expr + Number + Digit + End))
 ex1 = parse gram Expr "123+456"
