@@ -23,9 +23,12 @@ import Data.Functor.Compose ( Compose(Compose) )
 import Control.Applicative.Free ( hoistAp, Ap(..) )
 import Data.Proxy ( Proxy(..) )
 import Data.Char (intToDigit)
-import Control.Monad
 import Data.Type.Equality
 import Debug.Trace
+import qualified Data.List as List
+import Data.Bifunctor (second)
+import GHC.Exts (Any)
+import Unsafe.Coerce (unsafeCoerce)
 
 data (f + g) a = L (f a) | R (g a) deriving Show
 
@@ -224,29 +227,23 @@ instance (EqF f, EqF g) => EqF (f + g) where
     eqF _ _ = Nothing
 
 decode :: forall f a. (forall x. Show (f x), EqF f) => f a -> Int -> [EPN f] -> [a]
-decode nt0 r0 ds0 = go0 (Pa Erup nt0) 0 r0 where
-    go0 :: forall a b. Pa f (a -> b) b -> Int -> Int -> [a]
-    go0 (Pa Erup nt) l r = do
-        EPN (Slot nt' _ pa (Pure x)) l' k' r' <- ds0
-        case eqF nt n't of
-            Just Refl -> _ $ go0 pa _ _
-            _ -> []
+decode nt0 r0 ds0 = bind nt0 0 r0 (\_ x -> [x])
+    where
+        bind :: forall c r. (Show (f c)) => f c -> Int -> Int -> (Int -> c -> [r]) -> [r]
+        bind nt l r _ | trace ("bind " ++ show nt  ++ " " ++ show (l, r)) False = undefined
+        bind nt l r kont = do
+            EPN (Slot nt' _ pa (Pure x)) l' k r' <- ds0
+            case eqF nt nt' of
+                Just Refl | l == l', r == r' -> uncurry kont =<< go pa k undefined x
+                _ -> []
 
---     bind :: forall c r. (Show (f c)) => f c -> Int -> (Int -> c -> [r]) -> [r]
---     bind nt r _ | trace ("bind " ++ show nt  ++ ", " ++ show r) False = undefined
---     bind nt r kont = do
---         EPN (Slot nt' _ pa (Pure x)) _ k r' <- ds0
---         case eqF nt nt' of
---             Just Refl | r == r' -> uncurry kont =<< go pa k x
---             _ -> []
--- 
---     go :: forall b a. (forall x. Show (f x)) => Pa (Match + f) b a -> Int -> b -> [(Int, a)]
---     go pa k _ | trace ("go " ++ show pa  ++ ", " ++ show k) False = undefined
---     go pa k x = 
---         case pa of
---             Erup -> [(k, x)]
---             Pa pa' (L Match{}) -> go pa' (k - 1) (x ())
---             Pa pa' (R y) -> bind y k (\k' c -> go pa' k' (x c))
+        go :: forall b a. (forall x. Show (f x)) => Pa (Match + f) b a -> Int -> Int -> b -> [(Int, a)]
+        go pa k r _ | trace ("go " ++ show pa  ++ ", " ++ show (k, r)) False = undefined
+        go pa k r x = 
+            case pa of
+                Erup -> [(k, x)]
+                Pa pa' (L Match{}) -> go pa' undefined k (x ())
+                Pa pa' (R y) -> bind y k r (\k' c -> go pa' k' k (x c))
 
 data End a deriving (Show)
 instance EqF End where
@@ -307,7 +304,7 @@ G f <||> G g = G $ \case
 
 type Gram f = G f f
 
-end :: G End a
+end :: G End g
 end = G (\case)
 
 -- optimization idea: infer follow restrictions from grammar definition
@@ -321,8 +318,82 @@ gram = G (\Expr -> (+) <$> expr <* match '+' <*> expr <|> number)
 ex1 :: (Set (Descriptor (Expr + Number + Digit + End)), [EPN (Expr + Number + Digit + End)])
 ex1 = parse gram Expr "1+2+3"
 
+naiveDFS :: forall f g a. g < f => Gram f -> g a -> String -> [(a, String)]
+naiveDFS (G g) nt0 xs0 = (`go` xs0) =<< alternatives (g (inj nt0)) where
+    go :: forall b. Ap (Match + f) b -> String -> [(b, String)] 
+    go (Pure x) xs = [(x, xs)]
+    go (Ap (L (Match c)) next) xs
+     | c':xs' <- xs, c == c' = map (\(f, xs'') -> (f (), xs'')) (go next xs')
+     | otherwise = []
+    go (Ap (R nt) next) xs = do
+        next1 <- alternatives (g nt)
+        (x,xs') <- go next1 xs
+        (f,xs'') <- go next xs'
+        pure (f x, xs'')
+
+-- data Resumption f = forall a. Resumption (a -> )
+
+data Cursor f = forall a. Cursor (f a) !Int (Ap (Match + f) a)
+instance (forall x. Show (f x)) => Show (Cursor f) where
+    show (Cursor x y z) = "(Cursor (" ++ show x ++ ") (" ++ show y ++ ") (" ++ showAp z ++ "))"
+
+newtype MyMap f = MyMap (Map (SomeF f, Int) (Any -> [Cursor f]))
+
+instance Show (MyMap f) where
+    show (MyMap m) = "<MyMap " ++ show (Map.size m) ++ ">"
+
+myEmpty :: MyMap f
+myEmpty = MyMap Map.empty
+
+myInsert :: OrdF f => f a -> Int -> (a -> [Cursor f]) -> MyMap f -> MyMap f
+myInsert nt i f (MyMap m) = MyMap (Map.insertWith (\g h x -> g x ++ h x) (SomeF nt, i) (unsafeCoerce f) m)
+
+myLookup :: OrdF f => f a -> Int -> a -> MyMap f -> [Cursor f]
+myLookup nt i x (MyMap m) =
+    case Map.lookup (SomeF nt, i) m of
+        Just f -> unsafeCoerce f x
+        Nothing -> []
+
+myExists :: OrdF f => f a -> Int -> MyMap f -> Bool
+myExists nt i (MyMap m) =
+    case Map.lookup (SomeF nt, i) m of
+        Just{} -> True
+        Nothing -> False
+ 
+data PState f = PState !Int (MyMap f) [Cursor f]
+deriving instance (forall x. Show (f x)) => Show (PState f)
+
+step :: forall f. (forall x. Show (f x), OrdF f) => Gram f -> Char -> PState f -> PState f
+step (G g) c (PState i wa aps) = uncurry (PState (i + 1)) $ second concat (List.mapAccumL stepAp wa aps) where
+    stepAp :: MyMap f -> Cursor f -> (MyMap f, [Cursor f])
+    stepAp _ cursor | traceShow ("stepAp", cursor) False = undefined
+    stepAp wa' (Cursor nt i' ap) = 
+        case ap of
+            Pure{} -> (wa', [])
+            Ap (L (Match c')) next
+                | c == c' -> (wa', [Cursor nt i' (fmap ($ ()) next)]) -- todo: if next is Pure then lookup
+                | otherwise -> (wa', [])
+            Ap (R nt') next
+              | not (myExists nt' i wa') ->
+                let
+                    wa'' = myInsert nt' i (\x -> [Cursor nt i (($ unsafeCoerce x) <$> next)]) wa' -- todo: if next is pure then lookup
+                in
+                    second concat $ List.mapAccumL stepAp wa'' [Cursor nt' i aps' | aps' <- alternatives $ g nt'] -- todo: if aps' is Done then what?
+              | otherwise -> (wa', [])
+
 -- >>> snd ex1
 -- [EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 4 5,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 0 3 4,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 3,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 5,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 2 2 5,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 2 5,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 4 4 5,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 2 4 5,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 4 4 5,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 4 4 5,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 4 4 5,EPN (Slot (R (R (L Digit))) 3 (Pa Erup (L (Match '3'))) (Pure)) 4 4 5,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 2 3 4,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 2 2 3,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 2 3,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 2 2 3,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 2 2 3,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 2 2 3,EPN (Slot (R (R (L Digit))) 2 (Pa Erup (L (Match '2'))) (Pure)) 2 2 3,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 0 1 2,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 1,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 0 0 1,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 0 0 1,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 0 0 1,EPN (Slot (R (R (L Digit))) 1 (Pa Erup (L (Match '1'))) (Pure)) 0 0 1]
 
 -- >>> decode (inj Expr) 5 $ snd ex1
 -- []
+
+-- X ::= X + | C
+-- 
+-- C++
+-- 
+-- 
+-- C ; +
+-- 
+-- WD: 0: X ::= C, 0: X ::= C +
+-- WA: 0: X ; +
+
