@@ -23,6 +23,9 @@ import Data.Functor.Compose ( Compose(Compose) )
 import Control.Applicative.Free ( hoistAp, Ap(..) )
 import Data.Proxy ( Proxy(..) )
 import Data.Char (intToDigit)
+import Control.Monad
+import Data.Type.Equality
+import Debug.Trace
 
 data (f + g) a = L (f a) | R (g a) deriving Show
 
@@ -98,11 +101,12 @@ newtype G f g = G { lookupG :: forall a. f a -> Alt (Match + g) a }
 data Slot f a = forall b. 
     Slot
         !(f a) -- ^ The name of the current nonterminal
+        !Int
         (Pa (Match + f) b a) -- ^ The processed dependencies
         (Ap (Match + f) b) -- ^ The actions that still need to be done
 
 instance (forall x. (Show (f x))) => Show (Slot f a) where
-    show (Slot x y z) = "(Slot (" ++ show x ++ ") (" ++ show y ++ ") (" ++ showAp z ++ "))"
+    show (Slot x i y z) = "(Slot (" ++ show x ++ ") " ++ show i ++ " (" ++ show y ++ ") (" ++ showAp z ++ "))"
 
 data Descriptor f = forall a.
     Descriptor
@@ -127,20 +131,21 @@ instance OrdF f => Ord (SomeF f) where
     compare (SomeF x) (SomeF y) = compareF x y
 
 compareSlot :: OrdF f => Slot f a -> Slot f b -> Ordering
-compareSlot (Slot x1 x2 x3) (Slot y1 y2 y3) = compareF x1 y1 <> comparePa x2 y2 <> compareAp x3 y3
+compareSlot (Slot x1 x2 x3 x4) (Slot y1 y2 y3 y4) = compareF x1 y1 <> compare x2 y2 <> comparePa x3 y3 <> compareAp x4 y4
 
 compareDescriptor :: OrdF f => Descriptor f -> Descriptor f -> Ordering
 compareDescriptor (Descriptor x1 x2 x3 _) (Descriptor y1 y2 y3 _) = compareSlot x1 y1 <> compare x2 y2 <> compare x3 y3
 
-initialDescriptor :: f a -> String -> Ap (Match + f) a -> Descriptor f
-initialDescriptor nt xs act = Descriptor (Slot nt Erup act) 0 0 xs
+initialDescriptor :: f a -> Int -> String -> Ap (Match + f) a -> Descriptor f
+initialDescriptor nt i xs act = Descriptor (Slot nt i Erup act) 0 0 xs
 
-data EPN n = forall a.
+data EPN f = forall a.
     EPN
-        !(Slot n a)
+        !(Slot f a)
         !Int -- ^ left extent
         !Int -- ^ previous pivot
         !Int -- ^ pivot
+deriving instance (forall x. Show (f x)) => Show (EPN f)
 
 newtype WaitForAscend f = WA (Map (SomeF f, Int) [Int -> String -> Descriptor f])
 
@@ -168,59 +173,92 @@ insertWD nt k x (WD m) = WD (Map.insertWith (++) (SomeF nt, k) [x] m)
 --
 -- consider discarding the Pa data structure and just store a list of results in the descriptors (that might remove the need for EPNs?)
 -- when comparing the 'Pure' case we must always assume that they are different and just append the two input lists to form the result.
-parse :: forall a f g. (OrdF f, g < f) => Gram f -> g a -> String -> Set (Descriptor f)
-parse g z xs0 = go Set.empty emptyWA emptyWD (map (initialDescriptor (inj z) xs0) (alternatives (lookupG g (inj z)))) where
-    go :: Set (Descriptor f) -> WaitForAscend f -> WaitForDescend f -> [Descriptor f] -> Set (Descriptor f)
+parse :: forall a f g. (OrdF f, g < f) => Gram f -> g a -> String -> (Set (Descriptor f), [EPN f])
+parse g z xs0 = go Set.empty [] emptyWA emptyWD (zipWith (\i -> initialDescriptor (inj z) i xs0) [0..] (alternatives (lookupG g (inj z)))) where
+    go :: Set (Descriptor f) -> [EPN f] -> WaitForAscend f -> WaitForDescend f -> [Descriptor f] -> (Set (Descriptor f), [EPN f])
 
     -- If we've already processed this descriptor then we can skip it
-    go u wa wd (d : rs) | d `Set.member` u = go u wa wd rs
+    go u e wa wd (d : rs) | d `Set.member` u = go u e wa wd rs
 
     -- If we're currently 'Match'ing a character and that character appears in the input text then we can continue
-    go u wa wd (d@(Descriptor (Slot x ds (Ap (L (Match c)) r)) l k xs) : rs)
-        | c' : xs' <- xs, c == c' = go (Set.insert d u) wa wd (Descriptor (Slot x (Pa ds (L (Match c))) r) l (k + 1) xs' : rs)
+    go u e wa wd (d@(Descriptor (Slot x i ds (Ap (L (Match c)) r)) l k xs) : rs)
+        | c' : xs' <- xs, c == c' = let slot' = Slot x i (Pa ds (L (Match c))) r in go (Set.insert d u) (EPN slot' l k (k + 1) : e) wa wd (Descriptor slot' l (k + 1) xs' : rs)
         -- otherwise we skip this descriptor
-        | otherwise = go u wa wd rs
+        | otherwise = go u e wa wd rs
 
     -- If we're descending into a nonterminal then we check if something was already waiting for us to descend.
-    go u wa wd (d@(Descriptor (Slot x ds (Ap (R nt) next)) l k xs) : rs)
-        = go (Set.insert d u) (insertWA nt k (Descriptor (Slot x (Pa ds (R nt)) next) l) wa) wd $
-            case lookupWD wd nt k of
-                -- If nothing was waiting for this then we start descending by adding initial descriptors the nonterminal we are descending into.
-                [] -> [ Descriptor (Slot nt Erup acts) k k xs | acts <- alternatives (lookupG g nt) ] ++ rs
-                -- If something was waiting for us then we can take over where they left off.
-                _ -> [ Descriptor (Slot x (Pa ds (R nt)) next) l r xs' | (r, xs') <- lookupWD wd nt k ] ++ rs
+    go u e wa wd (d@(Descriptor (Slot x i ds (Ap (R nt) next)) l k xs) : rs) =
+        case lookupWD wd nt k of
+            -- If nothing was waiting for this then we start descending by adding initial descriptors the nonterminal we are descending into.
+            [] -> go (Set.insert d u) e (insertWA nt k (Descriptor (Slot x i (Pa ds (R nt)) next) l) wa) wd $
+                [ Descriptor (Slot nt i' Erup acts) k k xs | (i', acts) <- zip [0..] (alternatives (lookupG g nt)) ] ++ rs
+            -- If something was waiting for us then we can take over where they left off.
+            waiting -> 
+                let
+                    slot = Slot x i (Pa ds (R nt)) next
+                in
+                    go (Set.insert d u) ([EPN slot l k r | (r,_) <- waiting] ++ e) (insertWA nt k (Descriptor slot l) wa) wd $
+                        [ Descriptor slot l r xs' | (r, xs') <- waiting ] ++ rs
 
     -- If we have reached the end of a descriptor then we ascend.
-    go u wa wd (d@(Descriptor (Slot x _ (Pure _)) k r xs) : rs)
-        = go (Set.insert d u) wa (insertWD x k (r, xs) wd)
-            ([ f r xs | f <- lookupWA wa x k ] ++ rs)
+    go u e wa wd (d@(Descriptor slot@(Slot x i ds (Pure _)) k r xs) : rs)
+        = go (Set.insert d u) (concat [e1, e2, e]) wa (insertWD x k (r, xs) wd) (waiting ++ rs)
+        where
+            e1 :: [EPN f]
+            e1 =
+                case ds of
+                    Erup -> [EPN slot k r r]
+                    _ -> []
+            waiting = [ f r xs | f <- lookupWA wa x k ]
+            e2 :: [EPN f]
+            e2 = [ EPN slot' l k r | Descriptor slot' l _ _ <- waiting]
 
     -- If we have no more work then parsing is done!
-    go u _ _ [] = u
+    go u e _ _ [] = (u, e)
 
--- TODO: reimplement a correct decoding function
--- decode :: forall a f. Set (Descriptor f) -> f a -> Int -> Int -> [a]
--- decode ds0 = lookupM where
---     m :: Map (n, Int, Int) [Any]
---     m = Map.fromListWith (++)
---         [ ((x, l, r), map unsafeCoerce (go ds [a]))
---         | Descriptor (Descriptor (Slot nt _ _ ds (Pure a)) l r _) <- Set.toList ds0
---         ]
+class EqF f where
+    eqF :: f a -> f b -> Maybe (a :~: b)
+instance (EqF f, EqF g) => EqF (f + g) where
+    eqF (L x) (L y) = eqF x y
+    eqF (R x) (R y) = eqF x y
+    eqF _ _ = Nothing
+
+decode :: forall f a. (forall x. Show (f x), EqF f) => f a -> Int -> [EPN f] -> [a]
+decode nt0 r0 ds0 = go0 (Pa Erup nt0) 0 r0 where
+    go0 :: forall a b. Pa f (a -> b) b -> Int -> Int -> [a]
+    go0 (Pa Erup nt) l r = do
+        EPN (Slot nt' _ pa (Pure x)) l' k' r' <- ds0
+        case eqF nt n't of
+            Just Refl -> _ $ go0 pa _ _
+            _ -> []
+
+--     bind :: forall c r. (Show (f c)) => f c -> Int -> (Int -> c -> [r]) -> [r]
+--     bind nt r _ | trace ("bind " ++ show nt  ++ ", " ++ show r) False = undefined
+--     bind nt r kont = do
+--         EPN (Slot nt' _ pa (Pure x)) _ k r' <- ds0
+--         case eqF nt nt' of
+--             Just Refl | r == r' -> uncurry kont =<< go pa k x
+--             _ -> []
 -- 
---     lookupM :: forall c. f c -> Int -> Int -> [c]
---     lookupM nt l r = maybe [] (map unsafeCoerce) (m Map.!? (n, l, r)) 
--- 
---     go :: forall b c. Deps f b c -> [c] -> [b]
---     go Self x = x
---     go (Dep n l r xs) fs = go xs $ fs <*> lookupM n l r
+--     go :: forall b a. (forall x. Show (f x)) => Pa (Match + f) b a -> Int -> b -> [(Int, a)]
+--     go pa k _ | trace ("go " ++ show pa  ++ ", " ++ show k) False = undefined
+--     go pa k x = 
+--         case pa of
+--             Erup -> [(k, x)]
+--             Pa pa' (L Match{}) -> go pa' (k - 1) (x ())
+--             Pa pa' (R y) -> bind y k (\k' c -> go pa' k' (x c))
 
 data End a deriving (Show)
+instance EqF End where
+    eqF x _ = case x of
 instance OrdF End where
     compareF x _ = case x of
 
 data Number a where
     Number :: Number Int
 deriving instance Show (Number a)
+instance EqF Number where
+    eqF Number Number = Just Refl
 instance OrdF Number where
     compareF Number Number = EQ
 
@@ -230,6 +268,8 @@ number = send Number
 data Digit a where
     Digit :: Digit Int
 deriving instance Show (Digit a)
+instance EqF Digit where
+    eqF Digit Digit = Just Refl
 instance OrdF Digit where
     compareF Digit Digit = EQ
 
@@ -241,7 +281,8 @@ digit = send Digit
 data Expr a where
     Expr :: Expr Int
 deriving instance Show (Expr a)
-
+instance EqF Expr where
+    eqF Expr Expr = Just Refl
 instance OrdF Expr where
     compareF Expr Expr = EQ
 
@@ -277,8 +318,11 @@ gram = G (\Expr -> (+) <$> expr <* match '+' <*> expr <|> number)
   <||> G (\Digit -> asum [x <$ match (intToDigit x) | x <- [0..9]])
   <||> end
 
-ex1 :: Set (Descriptor (Expr + Number + Digit + End))
-ex1 = parse gram Expr "123+456"
+ex1 :: (Set (Descriptor (Expr + Number + Digit + End)), [EPN (Expr + Number + Digit + End)])
+ex1 = parse gram Expr "1+2+3"
 
--- >>> ex1
--- fromList [Descriptor (Descriptor (Slot (L Expr) (Erup) ((Ap (R (L Expr)) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))))) 0 0 "123+456"),Descriptor (Descriptor (Slot (L Expr) (Erup) ((Ap (R (L Expr)) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))))) 4 4 "456"),Descriptor (Descriptor (Slot (L Expr) (Erup) ((Ap (R (R (L Number))) (Pure)))) 0 0 "123+456"),Descriptor (Descriptor (Slot (L Expr) (Erup) ((Ap (R (R (L Number))) (Pure)))) 4 4 "456"),Descriptor (Descriptor (Slot (L Expr) (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 0 4 "456"),Descriptor (Descriptor (Slot (L Expr) (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 3 "+456"),Descriptor (Descriptor (Slot (L Expr) (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 5 "56"),Descriptor (Descriptor (Slot (L Expr) (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 6 "6"),Descriptor (Descriptor (Slot (L Expr) (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 7 ""),Descriptor (Descriptor (Slot (L Expr) (Pa Erup (R (R (L Number)))) (Pure)) 0 1 "23+456"),Descriptor (Descriptor (Slot (L Expr) (Pa Erup (R (R (L Number)))) (Pure)) 0 2 "3+456"),Descriptor (Descriptor (Slot (L Expr) (Pa Erup (R (R (L Number)))) (Pure)) 0 3 "+456"),Descriptor (Descriptor (Slot (L Expr) (Pa Erup (R (R (L Number)))) (Pure)) 4 5 "56"),Descriptor (Descriptor (Slot (L Expr) (Pa Erup (R (R (L Number)))) (Pure)) 4 6 "6"),Descriptor (Descriptor (Slot (L Expr) (Pa Erup (R (R (L Number)))) (Pure)) 4 7 ""),Descriptor (Descriptor (Slot (R (L Number)) (Erup) ((Ap (R (R (L Number))) ((Ap (R (R (R (L Digit)))) (Pure)))))) 0 0 "123+456"),Descriptor (Descriptor (Slot (R (L Number)) (Erup) ((Ap (R (R (L Number))) ((Ap (R (R (R (L Digit)))) (Pure)))))) 4 4 "456"),Descriptor (Descriptor (Slot (R (L Number)) (Erup) ((Ap (R (R (R (L Digit)))) (Pure)))) 0 0 "123+456"),Descriptor (Descriptor (Slot (R (L Number)) (Erup) ((Ap (R (R (R (L Digit)))) (Pure)))) 4 4 "456"),Descriptor (Descriptor (Slot (R (L Number)) (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 0 1 "23+456"),Descriptor (Descriptor (Slot (R (L Number)) (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 0 2 "3+456"),Descriptor (Descriptor (Slot (R (L Number)) (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 0 3 "+456"),Descriptor (Descriptor (Slot (R (L Number)) (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 4 5 "56"),Descriptor (Descriptor (Slot (R (L Number)) (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 4 6 "6"),Descriptor (Descriptor (Slot (R (L Number)) (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 4 7 ""),Descriptor (Descriptor (Slot (R (L Number)) (Pa Erup (R (R (R (L Digit))))) (Pure)) 0 1 "23+456"),Descriptor (Descriptor (Slot (R (L Number)) (Pa Erup (R (R (R (L Digit))))) (Pure)) 4 5 "56"),Descriptor (Descriptor (Slot (R (L Number)) (Pa (Pa Erup (R (R (L Number)))) (R (R (R (L Digit))))) (Pure)) 0 2 "3+456"),Descriptor (Descriptor (Slot (R (L Number)) (Pa (Pa Erup (R (R (L Number)))) (R (R (R (L Digit))))) (Pure)) 0 3 "+456"),Descriptor (Descriptor (Slot (R (L Number)) (Pa (Pa Erup (R (R (L Number)))) (R (R (R (L Digit))))) (Pure)) 4 6 "6"),Descriptor (Descriptor (Slot (R (L Number)) (Pa (Pa Erup (R (R (L Number)))) (R (R (R (L Digit))))) (Pure)) 4 7 ""),Descriptor (Descriptor (Slot (R (R (L Digit))) (Erup) ((Ap (L (Match '1')) (Pure)))) 0 0 "123+456"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Erup) ((Ap (L (Match '2')) (Pure)))) 1 1 "23+456"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Erup) ((Ap (L (Match '3')) (Pure)))) 2 2 "3+456"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Erup) ((Ap (L (Match '4')) (Pure)))) 4 4 "456"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Erup) ((Ap (L (Match '5')) (Pure)))) 5 5 "56"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Erup) ((Ap (L (Match '6')) (Pure)))) 6 6 "6"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Pa Erup (L (Match '1'))) (Pure)) 0 1 "23+456"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Pa Erup (L (Match '2'))) (Pure)) 1 2 "3+456"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Pa Erup (L (Match '3'))) (Pure)) 2 3 "+456"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Pa Erup (L (Match '4'))) (Pure)) 4 5 "56"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Pa Erup (L (Match '5'))) (Pure)) 5 6 "6"),Descriptor (Descriptor (Slot (R (R (L Digit))) (Pa Erup (L (Match '6'))) (Pure)) 6 7 "")]
+-- >>> snd ex1
+-- [EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 4 5,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 0 3 4,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 3,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 5,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 2 2 5,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 2 5,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 4 4 5,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 2 4 5,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 4 4 5,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 4 4 5,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 4 4 5,EPN (Slot (R (R (L Digit))) 3 (Pa Erup (L (Match '3'))) (Pure)) 4 4 5,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 2 3 4,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 2 2 3,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 2 3,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 2 2 3,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 2 2 3,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 2 2 3,EPN (Slot (R (R (L Digit))) 2 (Pa Erup (L (Match '2'))) (Pure)) 2 2 3,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 0 1 2,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 1,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 0 0 1,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 0 0 1,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 0 0 1,EPN (Slot (R (R (L Digit))) 1 (Pa Erup (L (Match '1'))) (Pure)) 0 0 1]
+
+-- >>> decode (inj Expr) 5 $ snd ex1
+-- []
