@@ -29,6 +29,7 @@ import qualified Data.List as List
 import Data.Bifunctor (second)
 import GHC.Exts (Any)
 import Unsafe.Coerce (unsafeCoerce)
+import Data.List (foldl')
 
 data (f + g) a = L (f a) | R (g a) deriving Show
 
@@ -128,6 +129,8 @@ class OrdF f where
 
 data SomeF f where
     SomeF :: f a -> SomeF f
+
+deriving instance (forall x. Show (f x)) => Show (SomeF f)
 instance OrdF f => Eq (SomeF f) where
     SomeF x == SomeF y = compareF x y == EQ
 instance OrdF f => Ord (SomeF f) where
@@ -338,9 +341,11 @@ instance (forall x. Show (f x)) => Show (Cursor f) where
     show (Cursor x y z) = "(Cursor (" ++ show x ++ ") (" ++ show y ++ ") (" ++ showAp z ++ "))"
 
 newtype MyMap f = MyMap (Map (SomeF f, Int) (Any -> [Cursor f]))
+instance (forall x. Show (f x), Show (SomeF f)) => Show (MyMap f) where
+    show (MyMap m) = "(MyMap " ++ show (map (second ($ undefined)) $ Map.toList m) ++ ")"
 
-instance Show (MyMap f) where
-    show (MyMap m) = "<MyMap " ++ show (Map.size m) ++ ">"
+-- instance Show (MyMap f) where
+--     show (MyMap m) = "<MyMap " ++ show (Map.size m) ++ ">"
 
 myEmpty :: MyMap f
 myEmpty = MyMap Map.empty
@@ -354,46 +359,52 @@ myLookup nt i x (MyMap m) =
         Just f -> unsafeCoerce f x
         Nothing -> []
 
-myExists :: OrdF f => f a -> Int -> MyMap f -> Bool
-myExists nt i (MyMap m) =
-    case Map.lookup (SomeF nt, i) m of
-        Just{} -> True
+myExists :: OrdF f => f a -> Int -> f b -> Int -> MyMap f -> Bool
+myExists nt' i nt j (MyMap m) =
+    case Map.lookup (SomeF nt', i) m of
+        Just f -> any (\(Cursor nt'' j' _) -> compareF nt nt'' == EQ && j' == j) (f undefined)
         Nothing -> False
+
+myMap :: ([Cursor f] -> [Cursor f]) -> MyMap f -> MyMap f
+myMap f (MyMap m) = MyMap (fmap (\g x -> f (g x)) m)
  
-data PState f = PState !Int (MyMap f) [Cursor f]
-deriving instance (forall x. Show (f x)) => Show (PState f)
+data PState f = PState !Int !(MyMap f) ![Cursor f]
+deriving instance (forall x. Show (f x), Show (SomeF f)) => Show (PState f)
 
-step :: forall f. (forall x. Show (f x), OrdF f) => Gram f -> Char -> PState f -> PState f
-step (G g) c (PState i wa aps) = uncurry (PState (i + 1)) $ second concat (List.mapAccumL stepAp wa aps) where
+initialPState :: Gram f -> f a -> PState f
+initialPState (G g) nt = PState 0 myEmpty [Cursor nt 0 aps | aps <- alternatives $ g nt]
+
+isPure :: Ap f a -> Bool
+isPure Pure{} = True
+isPure _ = False
+
+step :: forall f. (OrdF f) => Gram f -> Char -> PState f -> PState f
+step (G g) c (PState i wa0 aps) = uncurry (PState (i + 1)) $ second concat (List.mapAccumL stepAp wa0 aps) where
     stepAp :: MyMap f -> Cursor f -> (MyMap f, [Cursor f])
-    stepAp _ cursor | traceShow ("stepAp", cursor) False = undefined
-    stepAp wa' (Cursor nt i' ap) = 
+    -- stepAp _ cursor | traceShow ("stepAp", cursor) False = undefined
+    stepAp wa (Cursor nt j ap) =
         case ap of
-            Pure{} -> (wa', [])
+            Pure x ->
+                second concat $ List.mapAccumL stepAp wa $ {-filter (\(Cursor nt' j' ap') -> j /= j' || compareF nt' nt /= EQ || not (isPure ap')) -} myLookup nt j x wa
             Ap (L (Match c')) next
-                | c == c' -> (wa', [Cursor nt i' (fmap ($ ()) next)]) -- todo: if next is Pure then lookup
-                | otherwise -> (wa', [])
+                | c == c' -> (wa, [Cursor nt j (fmap ($ ()) next)]) -- todo: if next is Pure then lookup
+                | otherwise -> (wa, [])
             Ap (R nt') next
-              | not (myExists nt' i wa') ->
+              | not (myExists nt' i nt j wa) ->
                 let
-                    wa'' = myInsert nt' i (\x -> [Cursor nt i (($ unsafeCoerce x) <$> next)]) wa' -- todo: if next is pure then lookup
+                    wa' = myInsert nt' i (\x -> [Cursor nt j (($ unsafeCoerce x) <$> next)]) wa -- todo: if next is pure then lookup
                 in
-                    second concat $ List.mapAccumL stepAp wa'' [Cursor nt' i aps' | aps' <- alternatives $ g nt'] -- todo: if aps' is Done then what?
-              | otherwise -> (wa', [])
+                    second concat $ List.mapAccumL stepAp wa' [Cursor nt' i aps' | aps' <- alternatives $ g nt'] -- todo: if aps' is Done then what?
+              | otherwise -> (wa, [])
 
--- >>> snd ex1
--- [EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 4 5,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 0 3 4,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 3,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 5,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 2 2 5,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 2 5,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 4 4 5,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 2 4 5,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 4 4 5,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 4 4 5,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 4 4 5,EPN (Slot (R (R (L Digit))) 3 (Pa Erup (L (Match '3'))) (Pure)) 4 4 5,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 2 3 4,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 2 2 3,EPN (Slot (L Expr) 0 (Pa (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) (R (L Expr))) (Pure)) 0 2 3,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 2 2 3,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 2 2 3,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 2 2 3,EPN (Slot (R (R (L Digit))) 2 (Pa Erup (L (Match '2'))) (Pure)) 2 2 3,EPN (Slot (L Expr) 0 (Pa (Pa Erup (R (L Expr))) (L (Match '+'))) ((Ap (R (L Expr)) (Pure)))) 0 1 2,EPN (Slot (L Expr) 0 (Pa Erup (R (L Expr))) ((Ap (L (Match '+')) ((Ap (R (L Expr)) (Pure)))))) 0 0 1,EPN (Slot (R (L Number)) 0 (Pa Erup (R (R (L Number)))) ((Ap (R (R (R (L Digit)))) (Pure)))) 0 0 1,EPN (Slot (L Expr) 1 (Pa Erup (R (R (L Number)))) (Pure)) 0 0 1,EPN (Slot (R (L Number)) 1 (Pa Erup (R (R (R (L Digit))))) (Pure)) 0 0 1,EPN (Slot (R (R (L Digit))) 1 (Pa Erup (L (Match '1'))) (Pure)) 0 0 1]
+successes :: (EqF f, OrdF f) => PState f -> f a -> [a]
+successes (PState _ wa cs0) nt0 = go cs0 where
+    go [] = []
+    go (Cursor nt i (Pure x) : cs) =
+        case eqF nt0 nt of
+            Just Refl | i == 0 -> x : go cs
+            _ -> go (myLookup nt i x wa ++ cs)
+    go (_ : cs) = go cs
 
--- >>> decode (inj Expr) 5 $ snd ex1
--- []
-
--- X ::= X + | C
--- 
--- C++
--- 
--- 
--- C ; +
--- 
--- WD: 0: X ::= C, 0: X ::= C +
--- WA: 0: X ; +
-
+parseBF :: (EqF f, OrdF f) => Gram f -> f a -> String -> [a]
+parseBF g nt xs = successes (foldl' (flip (step g)) (initialPState g nt) xs) nt
