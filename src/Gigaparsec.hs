@@ -1,4 +1,3 @@
-module Gigaparsec (module Gigaparsec.Core, module Gigaparsec.Syntax) where
+module Gigaparsec (module Gigaparsec.Core) where
 
 import Gigaparsec.Core
-import Gigaparsec.Syntax

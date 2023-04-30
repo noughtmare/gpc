@@ -30,10 +30,8 @@ common common
 
 library
     import:           common
-    exposed-modules:          Gigaparsec, Gigaparsec.Core, Gigaparsec.Syntax
+    exposed-modules:          Gigaparsec, Gigaparsec.Core
     hs-source-dirs:           src
-    build-depends:       data-reify ^>= 0.6,
---                       recover-rtti,
 
 executable gigaparsec-examples
     import:           common
