@@ -11,12 +11,13 @@
 {-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-unticked-promoted-constructors #-}
 
-module Gigaparsec.Core (parse, match, send, G(G), Gram, (<||>), type (+), End, end, Alt, type (<)(..), OrdF(..), EqF(..)) where
+module Gigaparsec.Core where -- (parse, match, send, G(G), Gram, (<||>), type (+), End, end, Alt, type (<)(..), OrdF(..), EqF(..)) where
 
 import qualified Data.Map as Map
 import Data.Map (Map)
 import Data.Functor.Compose ( Compose(Compose) )
-import Control.Applicative.Free ( Ap(..) )
+-- import Control.Applicative.Free ( Ap(..) )
+-- import Control.Monad.Free ( Free(..) )
 import Data.Proxy ( Proxy(..) )
 import Data.Type.Equality
 import qualified Data.List as List
@@ -28,6 +29,7 @@ import Control.Applicative (Alternative)
 import Debug.Trace (traceShow)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Control.Monad (ap, (>=>))
 
 data (f + g) a = L (f a) | R (g a) deriving Show
 
@@ -62,27 +64,46 @@ deriving instance Show (Match a)
 instance OrdF Match where
     compareF (Match x) (Match y) = compare x y
 
-send :: f < g => f a -> Alt g a
-send x = Alt [Ap (inj x) (Pure id)]
+send :: (f < g) => f a -> Alt g a
+send x = Alt [FreeF (inj x) pure]
 
-match :: Match < f => Char -> Alt f ()
+match :: (Match < f) => Char -> Alt f ()
 match c = send (Match c)
 
--- Free alternative, see https://hackage.haskell.org/package/free-5.2/docs/Control-Alternative-Free.html
+-- Free(r) monadplus, see https://hackage.haskell.org/package/free-5.2/docs/Control-Alternative-Free.html
 -- But this one also satisfies right distributivity: f <*> (x <|> y) = (f <*> x) <|> (f <*> y)
 
-newtype Alt f a = Alt { alternatives :: [Ap f a] }
-    deriving (Functor, Applicative, Alternative) via Compose [] (Ap f)
+newtype Alt f a = Alt { alternatives :: [AltF f a] }
+    deriving (Functor, Applicative, Alternative) via Compose [] (AltF f)
+deriving instance (forall x. Show (f x)) => Show (Alt f a)
 
-instance OrdF f => OrdF (Ap f) where
-    compareF Pure{} Pure{} = EQ
-    compareF Pure{} _ = LT
-    compareF _ Pure{} = GT
-    compareF (Ap x xs) (Ap y ys) = compareF x y <> compareF xs ys
+instance Monad (Alt f) where
+    Alt xs >>= k = Alt $ xs >>= \case
+        Pure x -> alternatives (k x)
+        FreeF m k' -> [FreeF m (k' >=> k)]
 
-showAp :: (forall x. Show (f x)) => Ap f a -> String
-showAp Pure{} = "Pure"
-showAp (Ap x xs) = "(Ap (" ++ show x ++ ") (" ++ showAp xs ++ "))"
+data AltF f a = Pure a | forall c. FreeF (f c) (c -> Alt f a)
+deriving instance Functor (AltF f)
+instance Applicative (AltF f) where
+    pure = Pure
+    (<*>) = ap
+instance Monad (AltF f) where
+    Pure x >>= k = k x
+    FreeF m k1 >>= k2 = FreeF m (k1 >=> Alt . pure . k2)
+
+instance (forall x. Show (f x)) => Show (AltF f a) where
+    show Pure{} = "<Pure>"
+    show (FreeF m _) = "<FreeF (" ++ show m ++ ") k>"
+
+-- instance OrdF f => OrdF (AltF f) where
+--     compareF Pure{} Pure{} = EQ
+--     compareF Pure{} _ = LT
+--     compareF _ Pure{} = GT
+--     compareF (FreeF x k1) (FreeF y k2) = compareF x y
+
+-- showAp :: (forall x. Show (f x)) => Ap f a -> String
+-- showAp Pure{} = "Pure"
+-- showAp (Ap x xs) = "(Ap (" ++ show x ++ ") (" ++ showAp xs ++ "))"
 
 newtype G f g = G { lookupG :: forall a. f a -> Alt (Match + g) a }
 
@@ -140,14 +161,14 @@ end = G (\case)
 --         (f,xs'') <- go next xs'
 --         pure (f x, xs'')
 
-data Cursor f = forall a. Cursor (f a) !Int (Ap (Match + f) a)
-instance OrdF f => Eq (Cursor f) where
-    Cursor x1 x2 x3 == Cursor y1 y2 y3 = compareF x1 y1 == EQ && x2 == y2 && compareF x3 y3 == EQ
-instance OrdF f => Ord (Cursor f) where
-    compare (Cursor x1 x2 x3) (Cursor y1 y2 y3) = compareF x1 y1 <> compare x2 y2 <> compareF x3 y3
+data Cursor f = forall a. Cursor (f a) !Int (AltF (Match + f) a)
+-- instance OrdF f => Eq (Cursor f) where
+--     Cursor x1 x2 x3 == Cursor y1 y2 y3 = compareF x1 y1 == EQ && x2 == y2
+-- instance OrdF f => Ord (Cursor f) where
+--     compare (Cursor x1 x2 x3) (Cursor y1 y2 y3) = compareF x1 y1 <> compare x2 y2
 
 instance (forall x. Show (f x)) => Show (Cursor f) where
-    show (Cursor x y z) = "(Cursor (" ++ show x ++ ") (" ++ show y ++ ") (" ++ showAp z ++ "))"
+    show (Cursor x y z) = "(Cursor (" ++ show x ++ ") (" ++ show y ++ ") (" ++ show z ++ "))"
 
 newtype MyMap f = MyMap (Map (SomeF f, Int) (Any -> [Cursor f]))
 instance (forall x. Show (f x), Show (SomeF f)) => Show (MyMap f) where
@@ -165,34 +186,32 @@ myLookup nt i x (MyMap m) =
         Just f -> unsafeCoerce f x
         Nothing -> []
 
-myExists :: OrdF f => f a -> Int -> f b -> Int -> MyMap f -> Bool
-myExists nt' i nt j (MyMap m) =
-    case Map.lookup (SomeF nt', i) m of
-        Just f -> any (\(Cursor nt'' j' _) -> compareF nt nt'' == EQ && j' == j) (f undefined)
-        Nothing -> False
-
 data PState f = PState !Int !(MyMap f) ![Cursor f]
 deriving instance (forall x. Show (f x), Show (SomeF f)) => Show (PState f)
 
 initialPState :: Gram f -> f a -> PState f
 initialPState (G g) nt = PState 0 myEmpty [Cursor nt 0 aps | aps <- alternatives $ g nt]
 
+-- The Set SomeF approach I'm using is too restrictive. I've tried to call myInsert regardless of the check but that is not restrictive enough.
+-- Instead I suspect an approach that works is to annotate each cursor by a path indicating which alternatives have been chosen
+-- Then that path can be used to avoid reevaluating the same cursor multiple times.
+
 step :: forall f. (OrdF f) => Gram f -> Char -> PState f -> PState f
-step (G g) c (PState i wa0 aps) = uncurry (PState (i + 1)) $ bimap fst concat (List.mapAccumL stepAp (wa0, Set.empty) aps) where
-    stepAp :: (MyMap f, Set (Cursor f)) -> Cursor f -> ((MyMap f, Set (Cursor f)), [Cursor f])
-    stepAp (wa,done) cursor@(Cursor nt j ap)
+step (G g) c (PState i wa0 alts0) = uncurry (PState (i + 1)) $ bimap fst concat (List.mapAccumL stepAp (wa0, Set.empty) alts0) where
+    stepAp :: (MyMap f, Set (SomeF f)) -> Cursor f -> ((MyMap f, Set (SomeF f)), [Cursor f])
     --  | traceShow ("stepAp", cursor) False = undefined
-        | Set.member cursor done = ((wa, done), [])
-        | otherwise = let done' = Set.insert cursor done in
-            case ap of
+    stepAp (wa,done) (Cursor nt j alt) =
+            case alt of
                 Pure x ->
-                    second concat $ List.mapAccumL stepAp (wa,done') $ myLookup nt j x wa
-                Ap (L (Match c')) next
-                    | c == c' -> ((wa, done'), [Cursor nt j (fmap ($ ()) next)])
-                    | otherwise -> ((wa, done'), [])
-                Ap (R nt') next ->
-                    let wa' = myInsert nt' i (\x -> [Cursor nt j (($ x) <$> next)]) wa
-                    in second concat $ List.mapAccumL stepAp (wa',done') [Cursor nt' i aps' | aps' <- alternatives $ g nt']
+                    second concat $ List.mapAccumL stepAp (wa,done) $ myLookup nt j x wa
+                FreeF (L (Match c')) k
+                    | c == c' -> ((wa, done), Cursor nt j <$> alternatives (k ()))
+                    | otherwise -> ((wa, done), [])
+                FreeF (R nt') k
+                    | Set.notMember (SomeF nt') done ->
+                        let wa' = myInsert nt' i (\x -> Cursor nt j <$> alternatives (k x)) wa
+                        in second concat $ List.mapAccumL stepAp (wa', Set.insert (SomeF nt') done) [Cursor nt' i alts | alts <- alternatives $ g nt']
+                    | otherwise -> ((wa, done), [])
 
 --     isPure :: Ap f a -> Bool
 --     isPure Pure{} = True
@@ -207,5 +226,8 @@ successes (PState _ wa cs0) nt0 = go cs0 where
             _ -> go (myLookup nt i x wa ++ cs)
     go (_ : cs) = go cs
 
+traceShowIt :: Show b => b -> b
+traceShowIt x = traceShow x x
+
 parse :: (forall x. Show (f x), EqF f, OrdF f) => Gram f -> f a -> String -> [a]
-parse g nt xs = successes (foldl' (\s c -> {- traceShow s $ -} step g c s) (initialPState g nt) xs) nt
+parse g nt xs = successes (foldl' (\s c -> traceShowIt $ step g c s) (initialPState g nt) xs) nt
