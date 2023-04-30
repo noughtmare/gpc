@@ -1,7 +1,7 @@
 cabal-version:   3.0
 name:            gigaparsec
 version:         0.1.0.0
-license:         GPL-3.0-or-later
+license:         AGPL-3.0-or-later
 license-file:    LICENSE
 author:          jaro.reinders@gmail.com
 maintainer:      Jaro Reinders
