@@ -18,7 +18,7 @@ description:
     Gigaparsec is currently only a proof of concept. Of course it needs a much more
     elaborate API, but before that I want to implement disambiguation strategies.
     I have also not put any effort in making this library performant yet.
-tested-with: GHC ==9.2.7
+tested-with:     GHC ==9.2.7
 
 source-repository head
     type:     git
@@ -39,8 +39,3 @@ executable gigaparsec-examples
     main-is:          Main.hs
     hs-source-dirs:           examples
     build-depends:    gigaparsec
-
-executable gigaparsec-experiments
-    import:           common
-    main-is:          Main.hs
-    hs-source-dirs:           experiments

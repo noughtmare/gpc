@@ -20,11 +20,14 @@ import Control.Applicative.Free ( Ap(..) )
 import Data.Proxy ( Proxy(..) )
 import Data.Type.Equality
 import qualified Data.List as List
-import Data.Bifunctor (second)
+import Data.Bifunctor (second, Bifunctor (bimap))
 import GHC.Exts (Any)
 import Unsafe.Coerce (unsafeCoerce)
 import Data.List (foldl')
 import Control.Applicative (Alternative)
+import Debug.Trace (traceShow)
+import Data.Set (Set)
+import qualified Data.Set as Set
 
 data (f + g) a = L (f a) | R (g a) deriving Show
 
@@ -70,6 +73,12 @@ match c = send (Match c)
 
 newtype Alt f a = Alt { alternatives :: [Ap f a] }
     deriving (Functor, Applicative, Alternative) via Compose [] (Ap f)
+
+instance OrdF f => OrdF (Ap f) where
+    compareF Pure{} Pure{} = EQ
+    compareF Pure{} _ = LT
+    compareF _ Pure{} = GT
+    compareF (Ap x xs) (Ap y ys) = compareF x y <> compareF xs ys
 
 showAp :: (forall x. Show (f x)) => Ap f a -> String
 showAp Pure{} = "Pure"
@@ -132,6 +141,11 @@ end = G (\case)
 --         pure (f x, xs'')
 
 data Cursor f = forall a. Cursor (f a) !Int (Ap (Match + f) a)
+instance OrdF f => Eq (Cursor f) where
+    Cursor x1 x2 x3 == Cursor y1 y2 y3 = compareF x1 y1 == EQ && x2 == y2 && compareF x3 y3 == EQ
+instance OrdF f => Ord (Cursor f) where
+    compare (Cursor x1 x2 x3) (Cursor y1 y2 y3) = compareF x1 y1 <> compare x2 y2 <> compareF x3 y3
+
 instance (forall x. Show (f x)) => Show (Cursor f) where
     show (Cursor x y z) = "(Cursor (" ++ show x ++ ") (" ++ show y ++ ") (" ++ showAp z ++ "))"
 
@@ -164,25 +178,21 @@ initialPState :: Gram f -> f a -> PState f
 initialPState (G g) nt = PState 0 myEmpty [Cursor nt 0 aps | aps <- alternatives $ g nt]
 
 step :: forall f. (OrdF f) => Gram f -> Char -> PState f -> PState f
-step (G g) c (PState i wa0 aps) = uncurry (PState (i + 1)) $ second concat (List.mapAccumL stepAp wa0 aps) where
-    stepAp :: MyMap f -> Cursor f -> (MyMap f, [Cursor f])
-    -- stepAp _ cursor | traceShow ("stepAp", cursor) False = undefined
-    stepAp wa (Cursor nt j ap) =
-        case ap of
-            Pure x ->
-                -- This might loop infinitely if a nonterminal in the grammar has an empty production
-                second concat $ List.mapAccumL stepAp wa $ {-filter (\(Cursor nt' j' ap') -> j /= j' || compareF nt' nt /= EQ || not (isPure ap')) -} myLookup nt j x wa
-            Ap (L (Match c')) next
-                | c == c' -> (wa, [Cursor nt j (fmap ($ ()) next)])
-                | otherwise -> (wa, [])
-            Ap (R nt') next
-                -- this feels like a hack, it should also keep track of which alternative of nt we are in
-                | not (myExists nt' i nt j wa) ->
-                    let
-                        wa' = myInsert nt' i (\x -> [Cursor nt j (($ unsafeCoerce x) <$> next)]) wa
-                    in
-                        second concat $ List.mapAccumL stepAp wa' [Cursor nt' i aps' | aps' <- alternatives $ g nt']
-                | otherwise -> (wa, [])
+step (G g) c (PState i wa0 aps) = uncurry (PState (i + 1)) $ bimap fst concat (List.mapAccumL stepAp (wa0, Set.empty) aps) where
+    stepAp :: (MyMap f, Set (Cursor f)) -> Cursor f -> ((MyMap f, Set (Cursor f)), [Cursor f])
+    stepAp (wa,done) cursor@(Cursor nt j ap)
+    --  | traceShow ("stepAp", cursor) False = undefined
+        | Set.member cursor done = ((wa, done), [])
+        | otherwise = let done' = Set.insert cursor done in
+            case ap of
+                Pure x ->
+                    second concat $ List.mapAccumL stepAp (wa,done') $ myLookup nt j x wa
+                Ap (L (Match c')) next
+                    | c == c' -> ((wa, done'), [Cursor nt j (fmap ($ ()) next)])
+                    | otherwise -> ((wa, done'), [])
+                Ap (R nt') next ->
+                    let wa' = myInsert nt' i (\x -> [Cursor nt j (($ x) <$> next)]) wa
+                    in second concat $ List.mapAccumL stepAp (wa',done') [Cursor nt' i aps' | aps' <- alternatives $ g nt']
 
 --     isPure :: Ap f a -> Bool
 --     isPure Pure{} = True
@@ -197,5 +207,5 @@ successes (PState _ wa cs0) nt0 = go cs0 where
             _ -> go (myLookup nt i x wa ++ cs)
     go (_ : cs) = go cs
 
-parse :: (EqF f, OrdF f) => Gram f -> f a -> String -> [a]
-parse g nt xs = successes (foldl' (flip (step g)) (initialPState g nt) xs) nt
+parse :: (forall x. Show (f x), EqF f, OrdF f) => Gram f -> f a -> String -> [a]
+parse g nt xs = successes (foldl' (\s c -> {- traceShow s $ -} step g c s) (initialPState g nt) xs) nt

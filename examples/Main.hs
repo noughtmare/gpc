@@ -49,9 +49,10 @@ data ReplicateM p a where
     ReplicateM :: Int -> p a -> ReplicateM p [a]
 
 gram :: Gram (Expr + Number + Digit + End)
-gram = G (\Expr -> (+) <$> expr <* match '+' <*> expr <|> number)
+gram = G (\Expr -> (+) <$> expr <* match '+' <*> expr <|> (*) <$> expr <* match '*' <*> expr <|> number)
   <||> G (\Number -> (\x y -> 10 * x + y) <$> number <*> digit <|> digit)
   <||> G (\Digit -> asum [x <$ match (intToDigit x) | x <- [0..9]])
   <||> end
 
-main = print (parse gram (inj Expr) "1+2+3")
+main :: IO ()
+main = print (parse gram (inj Expr) "1+2*3")
