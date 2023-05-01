@@ -48,11 +48,32 @@ data Many p a where
 data ReplicateM p a where
     ReplicateM :: Int -> p a -> ReplicateM p [a]
 
-gram :: Gram (Expr + Number + Digit + End)
-gram = G (\Expr -> (+) <$> expr <* match '+' <*> expr <|> (*) <$> expr <* match '*' <*> expr <|> number)
-  <||> G (\Number -> (\x y -> 10 * x + y) <$> number <*> digit <|> digit)
-  <||> G (\Digit -> asum [x <$ match (intToDigit x) | x <- [0..9]])
-  <||> end
+data NDots a where
+  NDots :: Int -> NDots ()
+deriving instance Show (NDots a)
+instance EqF NDots where
+  eqF (NDots x) (NDots y) | x == y = Just Refl
+  eqF _ _ = Nothing
+instance OrdF NDots where
+  compareF (NDots x) (NDots y) = compare x y
+
+ndots :: (NDots < g) => Int -> Alt g ()
+ndots n = send (NDots n)
+
+gram :: Gram (Expr + Number + Digit + NDots + End)
+gram =
+  G (\Expr -> 
+    (+) <$> expr <* match '+' <*> expr <|>
+    (*) <$> expr <* match '*' <*> expr <|>
+    number <|>
+    (number >>= \n -> n <$ ndots n)) <||>
+  G (\Number -> (\x y -> 10 * x + y) <$> number <*> digit <|> digit) <||>
+  G (\Digit -> asum [x <$ match (intToDigit x) | x <- [0..9]]) <||>
+  G (\(NDots n) -> if n == 1 then match '.' else match '.' *> ndots (n - 1)) <||>
+  end
 
 main :: IO ()
-main = print (parse gram (inj Expr) "1+2*3")
+main = do
+  print (parse gram Expr "3..")
+  print (parse gram Expr "3...")
+  print (parse gram Expr "3....")

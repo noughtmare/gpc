@@ -16,8 +16,6 @@ module Gigaparsec.Core where -- (parse, match, send, G(G), Gram, (<||>), type (+
 import qualified Data.Map as Map
 import Data.Map (Map)
 import Data.Functor.Compose ( Compose(Compose) )
--- import Control.Applicative.Free ( Ap(..) )
--- import Control.Monad.Free ( Free(..) )
 import Data.Proxy ( Proxy(..) )
 import Data.Type.Equality
 import qualified Data.List as List
@@ -26,7 +24,7 @@ import GHC.Exts (Any)
 import Unsafe.Coerce (unsafeCoerce)
 import Data.List (foldl')
 import Control.Applicative (Alternative)
-import Debug.Trace (traceShow)
+-- import Debug.Trace (traceShow)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad (ap, (>=>))
@@ -44,7 +42,7 @@ instance In (Equal f g) f g h => f < (g + h) where
     inj = injIn (Proxy :: Proxy (Equal f g))
 
 class In b f g h where
-  injIn :: Proxy b -> f a -> (g + h) a
+    injIn :: Proxy b -> f a -> (g + h) a
 
 instance (f ~ g) => In True f g h where
     injIn Proxy = L
@@ -145,8 +143,7 @@ type Gram f = G f f
 end :: G End g
 end = G (\case)
 
--- optimization idea: infer follow restrictions from grammar definition
--- to prune branches earlier
+-- optimization idea: infer follow restrictions from grammar definition to prune branches earlier
 
 -- naiveDFS :: forall f g a. g < f => Gram f -> g a -> String -> [(a, String)]
 -- naiveDFS (G g) nt0 xs0 = (`go` xs0) =<< alternatives (g (inj nt0)) where
@@ -189,33 +186,26 @@ myLookup nt i x (MyMap m) =
 data PState f = PState !Int !(MyMap f) ![Cursor f]
 deriving instance (forall x. Show (f x), Show (SomeF f)) => Show (PState f)
 
-initialPState :: Gram f -> f a -> PState f
-initialPState (G g) nt = PState 0 myEmpty [Cursor nt 0 aps | aps <- alternatives $ g nt]
+-- FIXME: there are still problems with epsilon productions.
 
--- The Set SomeF approach I'm using is too restrictive. I've tried to call myInsert regardless of the check but that is not restrictive enough.
--- Instead I suspect an approach that works is to annotate each cursor by a path indicating which alternatives have been chosen
--- Then that path can be used to avoid reevaluating the same cursor multiple times.
+step :: (OrdF f) => Gram f -> Char -> PState f -> PState f
+step (G g) c (PState i wa0 alts0) =
+    uncurry (PState (i + 1)) $ bimap fst concat (List.mapAccumL (stepF g c i) (wa0, Set.empty) alts0)
 
-step :: forall f. (OrdF f) => Gram f -> Char -> PState f -> PState f
-step (G g) c (PState i wa0 alts0) = uncurry (PState (i + 1)) $ bimap fst concat (List.mapAccumL stepAp (wa0, Set.empty) alts0) where
-    stepAp :: (MyMap f, Set (SomeF f)) -> Cursor f -> ((MyMap f, Set (SomeF f)), [Cursor f])
-    --  | traceShow ("stepAp", cursor) False = undefined
-    stepAp (wa,done) (Cursor nt j alt) =
-            case alt of
-                Pure x ->
-                    second concat $ List.mapAccumL stepAp (wa,done) $ myLookup nt j x wa
-                FreeF (L (Match c')) k
-                    | c == c' -> ((wa, done), Cursor nt j <$> alternatives (k ()))
-                    | otherwise -> ((wa, done), [])
-                FreeF (R nt') k
-                    | Set.notMember (SomeF nt') done ->
-                        let wa' = myInsert nt' i (\x -> Cursor nt j <$> alternatives (k x)) wa
-                        in second concat $ List.mapAccumL stepAp (wa', Set.insert (SomeF nt') done) [Cursor nt' i alts | alts <- alternatives $ g nt']
-                    | otherwise -> ((wa, done), [])
-
---     isPure :: Ap f a -> Bool
---     isPure Pure{} = True
---     isPure _ = False
+stepF :: OrdF f => (forall x. f x -> Alt (Match + f) x) -> Char -> Int -> (MyMap f, Set (SomeF f)) -> Cursor f -> ((MyMap f, Set (SomeF f)), [Cursor f])
+--  | traceShow ("stepF", cursor) False = undefined
+stepF g c i = go where
+    go (wa,done) (Cursor nt j alt) =
+        case alt of
+            Pure x ->
+                second concat $ List.mapAccumL go (wa,done) $ myLookup nt j x wa
+            FreeF (L (Match c')) k
+                | c == c' -> ((wa, done), Cursor nt j <$> alternatives (k ()))
+                | otherwise -> ((wa, done), [])
+            FreeF (R nt') k ->
+                let wa' = myInsert nt' i (\x -> Cursor nt j <$> alternatives (k x)) wa in
+                second concat $ List.mapAccumL go (wa', Set.insert (SomeF nt') done)
+                    [Cursor nt' i alts | Set.notMember (SomeF nt') done, alts <- alternatives $ g nt']
 
 successes :: (EqF f, OrdF f) => PState f -> f a -> [a]
 successes (PState _ wa cs0) nt0 = go cs0 where
@@ -227,7 +217,12 @@ successes (PState _ wa cs0) nt0 = go cs0 where
     go (_ : cs) = go cs
 
 traceShowIt :: Show b => b -> b
-traceShowIt x = traceShow x x
+traceShowIt x = x -- traceShow x x
 
-parse :: (forall x. Show (f x), EqF f, OrdF f) => Gram f -> f a -> String -> [a]
-parse g nt xs = successes (foldl' (\s c -> traceShowIt $ step g c s) (initialPState g nt) xs) nt
+parse :: (forall x. Show (f x), EqF f, OrdF f, g < f) => Gram f -> g a -> String -> [a]
+parse (G g) nt [] = successes (PState 0 myEmpty [Cursor (inj nt) 0 alts | alts <- alternatives $ g (inj nt)]) (inj nt)
+parse g nt (c:cs) = successes (foldl' (\s c' -> traceShowIt $ step g c' s) (traceShowIt (initialPState g (inj nt) c)) cs) (inj nt)
+    where
+        initialPState (G g) nt c = uncurry (PState 1) $ bimap fst concat $ 
+            List.mapAccumL (stepF g c 0) (myEmpty, Set.singleton (SomeF nt))
+                [Cursor nt 0 aps | aps <- alternatives $ g nt]
