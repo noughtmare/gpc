@@ -34,8 +34,14 @@ library
     exposed-modules:          Gigaparsec, Gigaparsec.Core
     hs-source-dirs:           src
 
-executable gigaparsec-examples
+executable gpc-examples
     import:           common
     main-is:          Main.hs
-    hs-source-dirs:           examples
+    hs-source-dirs:   examples
     build-depends:    gigaparsec
+
+executable gpc-experiments
+    import:           common
+    main-is:          StackBased.hs
+    hs-source-dirs:   experiments
+    build-depends:    gigaparsec, mtl
