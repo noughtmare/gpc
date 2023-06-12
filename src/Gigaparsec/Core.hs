@@ -1,18 +1,16 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE TemplateHaskellQuotes #-}
+{-# LANGUAGE ExplicitNamespaces #-}
 
 module Gigaparsec.Core where
 
 import Control.Monad.State
-import Data.Foldable (traverse_)
 import Control.Applicative
-import Data.Type.Equality
+import Data.Type.Equality ( type (:~:)(Refl) )
 import Data.Bifunctor (first)
-import Unsafe.Coerce
+import Unsafe.Coerce ( unsafeCoerce )
 import qualified Debug.Trace
-import Data.Char
 import Language.Haskell.TH (Name)
 
 traceShow _ = id
@@ -49,12 +47,11 @@ instance Alternative Parser where
   Parser ps <|> Parser qs = Parser (ps <> qs)
 
 instance Monad Parser where
-    Parser xs >>= k0 = Parser (xs >>= go (alts . k0)) where
-        go :: (a -> [P b]) -> P a -> [P b]
-        go k (Success x) = k x
-        go k (T c p) = [T c (Parser (concatMap (go k) (alts p)))]
-        go k (NT n p q) = [NT n p (Parser . concatMap (go k) . alts . q)]
-
+  Parser xs >>= k0 = Parser (xs >>= go (alts . k0)) where
+    go :: (a -> [P b]) -> P a -> [P b]
+    go k (Success x) = k x
+    go k (T c p) = [T c (Parser (concatMap (go k) (alts p)))]
+    go k (NT n p q) = [NT n p (Parser . concatMap (go k) . alts . q)]
 
 data SelfCont a = forall b. SelfCont (Stack b a) (a -> Parser b)
 

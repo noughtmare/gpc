@@ -25,17 +25,25 @@ source-repository head
     location: https://github.com/noughtmare/gigaparsec
 
 common common
-    build-depends:            base >= 4.14 && <5, mtl, template-haskell
-    ghc-options:              -Wall
-    default-language:         GHC2021
+    build-depends:    base >= 4.14 && <5
+    ghc-options:      -Wall
+    default-language: GHC2021
 
 library
     import:           common
-    exposed-modules:          Gigaparsec, Gigaparsec.Core
-    hs-source-dirs:           src
+    exposed-modules:  Gigaparsec, Gigaparsec.Core
+    hs-source-dirs:   src
+    build-depends:    mtl, template-haskell        
 
 executable gpc-examples
     import:           common
     main-is:          Main.hs
     hs-source-dirs:   examples
     build-depends:    gigaparsec
+
+test-suite gpc-test
+  import:             common
+  type:               exitcode-stdio-1.0
+  hs-source-dirs:     tests
+  main-is:            test.hs
+  build-depends:      tasty, tasty-hunit, gigaparsec
