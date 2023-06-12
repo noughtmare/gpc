@@ -25,7 +25,7 @@ source-repository head
     location: https://github.com/noughtmare/gigaparsec
 
 common common
-    build-depends:            base >= 4.14 && <5, containers, free
+    build-depends:            base >= 4.14 && <5, mtl, template-haskell
     ghc-options:              -Wall
     default-language:         GHC2021
 
@@ -39,9 +39,3 @@ executable gpc-examples
     main-is:          Main.hs
     hs-source-dirs:   examples
     build-depends:    gigaparsec
-
-executable gpc-experiments
-    import:           common
-    main-is:          StackBased.hs
-    hs-source-dirs:   experiments
-    build-depends:    gigaparsec, mtl

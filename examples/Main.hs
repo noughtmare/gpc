@@ -1,79 +1,73 @@
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TemplateHaskellQuotes #-}
+
 import Gigaparsec
 
-import Control.Applicative ( asum, Alternative((<|>)) )
+import Control.Applicative ( Alternative((<|>)) )
 import Data.Char ( intToDigit )
-import Data.Type.Equality
+import Data.Foldable ( asum, traverse_ )
 
-data Number a where
-    Number :: Number Int
-deriving instance Show (Number a)
-instance EqF Number where
-    eqF Number Number = Just Refl
-instance OrdF Number where
-    compareF Number Number = EQ
+digit :: Int -> Parser Int
+digit b = asum [i <$ char (intToDigit i) | i <- [0..b - 1]]
 
-number :: Number < f => Alt f Int
-number = send Number
+number :: Int -> Parser Int
+number b = 'number
+  ::= (\x y -> b * x + y) <$> number b <*> digit b
+  <|> digit b
 
-data Digit a where
-    Digit :: Digit Int
-deriving instance Show (Digit a)
-instance EqF Digit where
-    eqF Digit Digit = Just Refl
-instance OrdF Digit where
-    compareF Digit Digit = EQ
+expr :: Parser Int
+expr = 'expr
+  ::= (*) <$> expr <* char '*' <*> expr
+  <|> (+) <$> expr <* char '+' <*> expr 
+  <|> number 10
 
-digit :: Digit < f => Alt f Int
-digit = send Digit
-
--- ergonomics idea: use overloaded labels or template haskell to avoid boilerplate
-
-data Expr a where
-    Expr :: Expr Int
-deriving instance Show (Expr a)
-instance EqF Expr where
-    eqF Expr Expr = Just Refl
-instance OrdF Expr where
-    compareF Expr Expr = EQ
-
-expr :: Expr < f => Alt f Int
-expr = send Expr
-
--- TODO: higher order nonterminals, e.g.:
-data Many p a where
-    Many :: p a -> Many m [a]
-
--- TODO: This would require using a free monad(plus) rather than just a free alternative:
-data ReplicateM p a where
-    ReplicateM :: Int -> p a -> ReplicateM p [a]
-
-data NDots a where
-  NDots :: Int -> NDots ()
-deriving instance Show (NDots a)
-instance EqF NDots where
-  eqF (NDots x) (NDots y) | x == y = Just Refl
-  eqF _ _ = Nothing
-instance OrdF NDots where
-  compareF (NDots x) (NDots y) = compare x y
-
-ndots :: (NDots < g) => Int -> Alt g ()
-ndots n = send (NDots n)
-
-gram :: Gram (Expr + Number + Digit + NDots + End)
-gram =
-  G (\Expr -> 
-    (+) <$> expr <* match '+' <*> expr <|>
-    (*) <$> expr <* match '*' <*> expr <|>
-    number <|>
-    (number >>= \n -> n <$ ndots n)) <||>
-  G (\Number -> (\x y -> 10 * x + y) <$> number <*> digit <|> digit) <||>
-  G (\Digit -> asum [x <$ match (intToDigit x) | x <- [0..9]]) <||>
-  G (\(NDots n) -> if n == 1 then match '.' else match '.' *> ndots (n - 1)) <||>
-  end
+ndots :: Parser ()
+ndots = number 10 >>= go where
+  go 0 = pure ()
+  go n = char '.' *> go (n - 1)
 
 main :: IO ()
 main = do
-  print (parse gram Expr "3..")
-  print (parse gram Expr "3...")
-  print (parse gram Expr "3....")
+  -- simple left-recursive
+  putStrLn "Should succeed:"
+  traverse_ (\x -> print (x, parse (number 2) x))
+    [ "0"
+    , "1"
+    , "00"
+    , "01"
+    , "11"
+    , "00000"
+    , "01011"
+    , "11111"
+    ]
+  putStrLn "Should fail:"
+  traverse_ (\x -> print (x, parse (number 2) x))
+    [ ""
+    , "X"
+    , "01X00"
+    , "1001X"
+    , "X1101"
+    ]
+
+  -- more complicated left-recursive
+  putStrLn "Should succeed:"
+  traverse_ (\x -> print (x, parse expr x))
+    [ "1+1" 
+    , "1+2+3"
+--    , "1+2+3+4+5+6+7+8+9"
+    , "1+2*3"
+    ]
+
+  -- monadic
+  putStrLn "Should succeed:"
+  traverse_ (\x -> print (x, parse ndots x))
+    [ "5....."
+    , "3..."
+    , "10.........."
+    ]
+  putStrLn "Should fail:"
+  traverse_ (\x -> print (x, parse ndots x))
+    [ "5...."
+    , "5......"
+    , "3....."
+    , "10........"
+    ]

@@ -1,228 +1,118 @@
-
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE DerivingVia #-}
-{-# LANGUAGE QuantifiedConstraints #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE LambdaCase #-}
-{-# OPTIONS_GHC -Wno-unticked-promoted-constructors #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TemplateHaskellQuotes #-}
 
-module Gigaparsec.Core where -- (parse, match, send, G(G), Gram, (<||>), type (+), End, end, Alt, type (<)(..), OrdF(..), EqF(..)) where
+module Gigaparsec.Core where
 
-import qualified Data.Map as Map
-import Data.Map (Map)
-import Data.Functor.Compose ( Compose(Compose) )
-import Data.Proxy ( Proxy(..) )
+import Control.Monad.State
+import Data.Foldable (traverse_)
+import Control.Applicative
 import Data.Type.Equality
-import qualified Data.List as List
-import Data.Bifunctor (second, Bifunctor (bimap))
-import GHC.Exts (Any)
-import Unsafe.Coerce (unsafeCoerce)
-import Data.List (foldl')
-import Control.Applicative (Alternative)
--- import Debug.Trace (traceShow)
-import Data.Set (Set)
-import qualified Data.Set as Set
-import Control.Monad (ap, (>=>))
+import Data.Bifunctor (first)
+import Unsafe.Coerce
+import qualified Debug.Trace
+import Data.Char
+import Language.Haskell.TH (Name)
 
-data (f + g) a = L (f a) | R (g a) deriving Show
+traceShow _ = id
 
-type family Equal a b where
-    Equal a a = True
-    Equal a b = False
+type Id a = Name
+newtype Parser a = Parser { alts :: [P a] }
+data P a = T Char (Parser a) | forall b. NT (Id b) (Parser b) (b -> Parser a) | Success a
 
-class f < g where
-    inj :: f a -> g a
+instance Functor P where
+  fmap f (T c p) = T c (fmap f p)
+  fmap f (NT n p q) = NT n p (fmap f . q)
+  fmap f (Success x) = Success (f x)
 
-instance In (Equal f g) f g h => f < (g + h) where
-    inj = injIn (Proxy :: Proxy (Equal f g))
+char :: Char -> Parser ()
+char c = Parser [T c (pure ())]
 
-class In b f g h where
-    injIn :: Proxy b -> f a -> (g + h) a
+pattern (::=) :: Name -> Parser a -> Parser a
+pattern name ::= p <- (error "'::=' cannot be used in a pattern." -> (name, p)) where
+  (::=) = \name p -> Parser [NT name p (\x -> Parser [Success x])]
+infix 1 ::= -- tighter than $ but looser than <|>
 
-instance (f ~ g) => In True f g h where
-    injIn Proxy = L
-instance f < h => In False f g h where
-    injIn Proxy = R . inj
+instance Functor Parser where
+  fmap f (Parser xs) = Parser (map (fmap f) xs)
 
-instance (OrdF f, OrdF g) => OrdF (f + g) where
-    compareF (L x) (L y) = compareF x y
-    compareF (L _) (R _) = LT
-    compareF (R _) (L _) = GT
-    compareF (R x) (R y) = compareF x y
+instance Applicative Parser where
+  pure x = Parser [Success x]
+  Parser ps <*> q0 = asum $ fmap (`seqP` q0) ps where
+    seqP (T c p) q = Parser [T c (p <*> q)]
+    seqP (NT n p p') q = Parser [NT n p (\x -> p' x <*> q)]
+    seqP (Success f) q = f <$> q
 
-data Match a where
-    Match :: Char -> Match ()
-deriving instance Show (Match a)
+instance Alternative Parser where
+  empty = Parser []
+  Parser ps <|> Parser qs = Parser (ps <> qs)
 
-instance OrdF Match where
-    compareF (Match x) (Match y) = compare x y
+instance Monad Parser where
+    Parser xs >>= k0 = Parser (xs >>= go (alts . k0)) where
+        go :: (a -> [P b]) -> P a -> [P b]
+        go k (Success x) = k x
+        go k (T c p) = [T c (Parser (concatMap (go k) (alts p)))]
+        go k (NT n p q) = [NT n p (Parser . concatMap (go k) . alts . q)]
 
-send :: (f < g) => f a -> Alt g a
-send x = Alt [FreeF (inj x) pure]
 
-match :: (Match < f) => Char -> Alt f ()
-match c = send (Match c)
+data SelfCont a = forall b. SelfCont (Stack b a) (a -> Parser b)
 
--- Free(r) monadplus, see https://hackage.haskell.org/package/free-5.2/docs/Control-Alternative-Free.html
--- But this one also satisfies right distributivity: f <*> (x <|> y) = (f <*> x) <|> (f <*> y)
+data Stack a b where
+  SNil :: Stack a a
+  SCons :: Id a -> Int -> [SelfCont a] -> (a -> Parser b) -> Stack b c -> Stack a c
 
-newtype Alt f a = Alt { alternatives :: [AltF f a] }
-    deriving (Functor, Applicative, Alternative) via Compose [] (AltF f)
-deriving instance (forall x. Show (f x)) => Show (Alt f a)
+eqId :: Id a -> Id b -> Maybe (a :~: b)
+eqId x y
+  | x == y = Just (unsafeCoerce Refl)
+  | otherwise = Nothing
 
-instance Monad (Alt f) where
-    Alt xs >>= k = Alt $ xs >>= \case
-        Pure x -> alternatives (k x)
-        FreeF m k' -> [FreeF m (k' >=> k)]
+unwind :: forall a b c. Id b -> Int -> Stack a c -> Maybe (Stack a b, Stack b c)
+unwind _ _ SNil = Nothing
+unwind n i (SCons n' i' dcs k s) =
+  case eqId @a @b n n' of
+    Just Refl | i == i' -> Just (SNil, SCons n' i' dcs k s)
+    _ -> first (SCons n' i' dcs k) <$> unwind n i s
 
-data AltF f a = Pure a | forall c. FreeF (f c) (c -> Alt f a)
-deriving instance Functor (AltF f)
-instance Applicative (AltF f) where
-    pure = Pure
-    (<*>) = ap
-instance Monad (AltF f) where
-    Pure x >>= k = k x
-    FreeF m k1 >>= k2 = FreeF m (k1 >=> Alt . pure . k2)
+appendStack :: Stack a b -> Stack b c -> Stack a c
+appendStack SNil x = x
+appendStack (SCons n i ks k stack') stack'' = SCons n i ks k (appendStack stack' stack'')
 
-instance (forall x. Show (f x)) => Show (AltF f a) where
-    show Pure{} = "<Pure>"
-    show (FreeF m _) = "<FreeF (" ++ show m ++ ") k>"
+update :: ([SelfCont a] -> [SelfCont a]) -> Stack a b -> Stack a b
+update f (SCons n i q q' s) = SCons n i (f q) q' s
+update _ SNil = error "Cannot update SNil"
 
--- instance OrdF f => OrdF (AltF f) where
---     compareF Pure{} Pure{} = EQ
---     compareF Pure{} _ = LT
---     compareF _ Pure{} = GT
---     compareF (FreeF x k1) (FreeF y k2) = compareF x y
+parse :: forall a. Parser a -> String -> [a]
+parse p0 xs0 = evalState (parse' 0 xs0 p0) SNil where
+  parse' :: Int -> String -> Parser b -> State (Stack b c) [c]
+  parse' i xs = fmap concat . traverse (go i xs) . alts
 
--- showAp :: (forall x. Show (f x)) => Ap f a -> String
--- showAp Pure{} = "Pure"
--- showAp (Ap x xs) = "(Ap (" ++ show x ++ ") (" ++ showAp xs ++ "))"
+  go :: forall b c. Int -> String -> P b -> State (Stack b c) [c]
+  go i (:){} (T c _) | traceShow ("t/match", c, i) False = undefined
+  go i (x:xs) (T c p) | x == c = parse' (i + 1) xs p
+  go i [] (T c _) | traceShow ("t/fail", c, i) False = undefined
+  go _ _ T{} = pure []
 
-newtype G f g = G { lookupG :: forall a. f a -> Alt (Match + g) a }
+  go i xs (NT n p p') = state $ \s -> 
+    -- Find out if the current (n, i) combination is already on the stack
+    case unwind n i s of
+      -- If not, push a new empty continuation on the initial stack (stack0) and continue running
+      Nothing | traceShow ("nt/nothing", n, i) False -> undefined
+      Nothing -> let (x, s') = runState (parse' i xs p) (SCons n i [] p' s) in (x, maybe undefined snd (unwind n i s'))
+      -- If so, add the p' as a new continuation, fail the current branch, and do update the stack
+      Just{} | traceShow ("nt/just", n, i) False -> undefined
+      Just (stack0, stack1) -> 
+        ([], appendStack stack0 (update (SelfCont stack0 p' :) stack1))
 
-class OrdF f where
-    compareF :: f a -> f b -> Ordering
-
-data SomeF f where
-    SomeF :: f a -> SomeF f
-
-deriving instance (forall x. Show (f x)) => Show (SomeF f)
-instance OrdF f => Eq (SomeF f) where
-    SomeF x == SomeF y = compareF x y == EQ
-instance OrdF f => Ord (SomeF f) where
-    compare (SomeF x) (SomeF y) = compareF x y
-
-class EqF f where
-    eqF :: f a -> f b -> Maybe (a :~: b)
-instance (EqF f, EqF g) => EqF (f + g) where
-    eqF (L x) (L y) = eqF x y
-    eqF (R x) (R y) = eqF x y
-    eqF _ _ = Nothing
-
-data End a deriving (Show)
-instance EqF End where
-    eqF x _ = case x of
-instance OrdF End where
-    compareF x _ = case x of
-
-infixr +
-infixr <||>
-
-(<||>) :: G f h -> G g h -> G (f + g) h
-G f <||> G g = G $ \case
-    L y -> f y
-    R y -> g y
-
-type Gram f = G f f
-
-end :: G End g
-end = G (\case)
-
--- optimization idea: infer follow restrictions from grammar definition to prune branches earlier
-
--- naiveDFS :: forall f g a. g < f => Gram f -> g a -> String -> [(a, String)]
--- naiveDFS (G g) nt0 xs0 = (`go` xs0) =<< alternatives (g (inj nt0)) where
---     go :: forall b. Ap (Match + f) b -> String -> [(b, String)] 
---     go (Pure x) xs = [(x, xs)]
---     go (Ap (L (Match c)) next) xs
---      | c':xs' <- xs, c == c' = map (\(f, xs'') -> (f (), xs'')) (go next xs')
---      | otherwise = []
---     go (Ap (R nt) next) xs = do
---         next1 <- alternatives (g nt)
---         (x,xs') <- go next1 xs
---         (f,xs'') <- go next xs'
---         pure (f x, xs'')
-
-data Cursor f = forall a. Cursor (f a) !Int (AltF (Match + f) a)
--- instance OrdF f => Eq (Cursor f) where
---     Cursor x1 x2 x3 == Cursor y1 y2 y3 = compareF x1 y1 == EQ && x2 == y2
--- instance OrdF f => Ord (Cursor f) where
---     compare (Cursor x1 x2 x3) (Cursor y1 y2 y3) = compareF x1 y1 <> compare x2 y2
-
-instance (forall x. Show (f x)) => Show (Cursor f) where
-    show (Cursor x y z) = "(Cursor (" ++ show x ++ ") (" ++ show y ++ ") (" ++ show z ++ "))"
-
-newtype MyMap f = MyMap (Map (SomeF f, Int) (Any -> [Cursor f]))
-instance (forall x. Show (f x), Show (SomeF f)) => Show (MyMap f) where
-    show (MyMap m) = "(MyMap " ++ show (map (second ($ undefined)) $ Map.toList m) ++ ")"
-
-myEmpty :: MyMap f
-myEmpty = MyMap Map.empty
-
-myInsert :: OrdF f => f a -> Int -> (a -> [Cursor f]) -> MyMap f -> MyMap f
-myInsert nt i f (MyMap m) = MyMap (Map.insertWith (\g h x -> g x ++ h x) (SomeF nt, i) (unsafeCoerce f) m)
-
-myLookup :: OrdF f => f a -> Int -> a -> MyMap f -> [Cursor f]
-myLookup nt i x (MyMap m) =
-    case Map.lookup (SomeF nt, i) m of
-        Just f -> unsafeCoerce f x
-        Nothing -> []
-
-data PState f = PState !Int !(MyMap f) ![Cursor f]
-deriving instance (forall x. Show (f x), Show (SomeF f)) => Show (PState f)
-
--- FIXME: there are still problems with epsilon productions.
-
-step :: (OrdF f) => Gram f -> Char -> PState f -> PState f
-step (G g) c (PState i wa0 alts0) =
-    uncurry (PState (i + 1)) $ bimap fst concat (List.mapAccumL (stepF g c i) (wa0, Set.empty) alts0)
-
-stepF :: OrdF f => (forall x. f x -> Alt (Match + f) x) -> Char -> Int -> (MyMap f, Set (SomeF f)) -> Cursor f -> ((MyMap f, Set (SomeF f)), [Cursor f])
---  | traceShow ("stepF", cursor) False = undefined
-stepF g c i = go where
-    go (wa,done) (Cursor nt j alt) =
-        case alt of
-            Pure x ->
-                second concat $ List.mapAccumL go (wa,done) $ myLookup nt j x wa
-            FreeF (L (Match c')) k
-                | c == c' -> ((wa, done), Cursor nt j <$> alternatives (k ()))
-                | otherwise -> ((wa, done), [])
-            FreeF (R nt') k ->
-                let wa' = myInsert nt' i (\x -> Cursor nt j <$> alternatives (k x)) wa in
-                second concat $ List.mapAccumL go (wa', Set.insert (SomeF nt') done)
-                    [Cursor nt' i alts | Set.notMember (SomeF nt') done, alts <- alternatives $ g nt']
-
-successes :: (EqF f, OrdF f) => PState f -> f a -> [a]
-successes (PState _ wa cs0) nt0 = go cs0 where
-    go [] = []
-    go (Cursor nt i (Pure x) : cs) =
-        case eqF nt0 nt of
-            Just Refl | i == 0 -> x : go cs
-            _ -> go (myLookup nt i x wa ++ cs)
-    go (_ : cs) = go cs
-
-traceShowIt :: Show b => b -> b
-traceShowIt x = x -- traceShow x x
-
-parse :: (forall x. Show (f x), EqF f, OrdF f, g < f) => Gram f -> g a -> String -> [a]
-parse (G g) nt [] = successes (PState 0 myEmpty [Cursor (inj nt) 0 alts | alts <- alternatives $ g (inj nt)]) (inj nt)
-parse g nt (c:cs) = successes (foldl' (\s c' -> traceShowIt $ step g c' s) (traceShowIt (initialPState g (inj nt) c)) cs) (inj nt)
-    where
-        initialPState (G g) nt c = uncurry (PState 1) $ bimap fst concat $ 
-            List.mapAccumL (stepF g c 0) (myEmpty, Set.singleton (SomeF nt))
-                [Cursor nt 0 aps | aps <- alternatives $ g nt]
+  go i xs (Success x) = state $ \stack ->
+    case stack of
+      -- If there's something on the stack we can either:
+      -- use it to continue parsing, or ignore it and pop it from the stack
+      SCons{} | traceShow ("success/scons", i) False -> undefined
+      SCons _ _ ks p' stack' -> 
+        ( evalState (parse' i xs (p' x)) stack'
+          ++ concat [evalState (parse' i xs (p x)) (appendStack s stack) | SelfCont s p <- ks]
+        , stack)
+      -- If there's nothing on the stack then we succeed iff there is also no remaining input
+      SNil | traceShow ("success/snil", i) False -> undefined
+      SNil -> ([x | null xs], stack)
