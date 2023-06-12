@@ -75,6 +75,4 @@ unitTests = testGroup "Unit tests"
       , "3....."
       , "10........"
       ]
-  , testCase "fail" $
-    assertBool "fail" False
   ]
