@@ -8,9 +8,9 @@
 #
 # For more information, see https://github.com/haskell-CI/haskell-ci
 #
-# version: 0.16
+# version: 0.16.3
 #
-# REGENDATA ("0.16",["github","gigaparsec.cabal"])
+# REGENDATA ("0.16.3",["github","gigaparsec.cabal"])
 #
 name: Haskell-CI
 on:
@@ -167,6 +167,9 @@ jobs:
       - name: build
         run: |
           $CABAL v2-build $ARG_COMPILER $ARG_TESTS $ARG_BENCH all --write-ghc-environment-files=always
+      - name: tests
+        run: |
+          $CABAL v2-test $ARG_COMPILER $ARG_TESTS $ARG_BENCH all --test-show-details=direct
       - name: cabal check
         run: |
           cd ${PKGDIR_gigaparsec} || false
