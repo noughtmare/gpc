@@ -16,13 +16,9 @@ import Language.Haskell.TH (Name)
 traceShow _ = id
 
 type Id a = Name
-newtype Parser a = Parser { alts :: [P a] }
+newtype Parser a = Parser { alts :: [P a] } deriving Functor
 data P a = T Char (Parser a) | forall b. NT (Id b) (Parser b) (b -> Parser a) | Success a
-
-instance Functor P where
-  fmap f (T c p) = T c (fmap f p)
-  fmap f (NT n p q) = NT n p (fmap f . q)
-  fmap f (Success x) = Success (f x)
+deriving instance Functor P
 
 char :: Char -> Parser ()
 char c = Parser [T c (pure ())]
@@ -31,9 +27,6 @@ pattern (::=) :: Name -> Parser a -> Parser a
 pattern name ::= p <- (error "'::=' cannot be used in a pattern." -> (name, p)) where
   (::=) = \name p -> Parser [NT name p (\x -> Parser [Success x])]
 infix 1 ::= -- tighter than $ but looser than <|>
-
-instance Functor Parser where
-  fmap f (Parser xs) = Parser (map (fmap f) xs)
 
 instance Applicative Parser where
   pure x = Parser [Success x]
