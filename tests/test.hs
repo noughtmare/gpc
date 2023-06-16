@@ -36,9 +36,11 @@ ndots = number 10 >>= go where
   go 0 = pure ()
   go n = char '.' *> go (n - 1)
 
-
 tests :: TestTree
 tests = testGroup "Tests" [unitTests]
+
+emptyk :: Parser ()
+emptyk = 'emptyk ::= emptyk <|> pure ()
 
 unitTests :: TestTree
 unitTests = testGroup "Unit tests"
@@ -86,4 +88,7 @@ unitTests = testGroup "Unit tests"
       , "3....."
       , "10"
       ]
+  , localOption (Timeout 1000000 "1s") $
+    testCase "emptyk positive" $ 
+      parse emptyk "" @?= [()]
   ]
