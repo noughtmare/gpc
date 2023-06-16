@@ -26,6 +26,11 @@ expr = 'expr
   <|> (+) <$> expr <* char '+' <*> expr 
   <|> number 10
 
+expr2 :: Parser Int
+expr2 = 'expr2
+  ::= number 10
+  <|> (+) <$> expr2 <* char '+' <*> expr2
+
 ndots :: Parser ()
 ndots = number 10 >>= go where
   go 0 = pure ()
@@ -62,6 +67,12 @@ unitTests = testGroup "Unit tests"
       , ("1+2+3", [6,6])
       , ("1+2*3", [9,7])
       ]
+  , testCase "expr2 positive" $
+    traverse_ (\(x, y) -> parse expr2 x @?= y)
+      [ ("1+2", [3])
+      , ("1+2+3", [6,6])
+      , ("1+2+3+4", [10,10,10,10])
+      ]
   , testCase "ndots positive" $
     traverse_ (\x -> parse ndots x @?= [()])
       [ "5....."
@@ -73,6 +84,6 @@ unitTests = testGroup "Unit tests"
       [ "5...."
       , "5......"
       , "3....."
-      , "10........"
+      , "10"
       ]
   ]
