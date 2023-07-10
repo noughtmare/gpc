@@ -13,10 +13,10 @@ I have also not put any effort in making this library performant yet.
 
 Feature | (atto/mega)parsec | happy (LALR) | Earley | gigaparsec
 ---|---|---|---|---
-No shift-reduce conflicts | ✅ | ❌ | ✅ | ✅
-Left-recusion             | ❌ | ✅ | ✅ | ✅
-Pure Haskell              | ✅ | ❌ | ✅ | ✅
-Monadic                   | ✅ | ❌ | ❌ | ✅
-O(n^3) time worst-case    | ❌ | ✅ | ✅ | ❌
-O(n) time worst-case      | ❌ | ✅ | ❌ | ❌
-O(n) time possible        | ✅ | ✅ | ❌ | ✅
+No shift-reduce conflicts | :heavy_check_mark: | :x: | :heavy_check_mark: | :heavy_check_mark:
+Left-recusion             | :x: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:
+Pure Haskell              | :heavy_check_mark: | :x: | :heavy_check_mark: | :heavy_check_mark:
+Monadic                   | :heavy_check_mark: | :x: | :x: | :heavy_check_mark:
+O(n^3) time worst-case    | :x: | :heavy_check_mark: | :heavy_check_mark: | :x:
+O(n) time worst-case      | :x: | :heavy_check_mark: | :x: | :x:
+O(n) time possible        | :heavy_check_mark: | :heavy_check_mark: | :x: | :heavy_check_mark:
