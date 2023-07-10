@@ -13,10 +13,10 @@ I have also not put any effort in making this library performant yet.
 
 Feature | (atto/mega)parsec | happy (LALR) | Earley | gigaparsec
 ---|---|---|---|---
-Shift-reduce conflicts | :green_square: | :red_square:   | :green_square: | :green_square:
-Left-recusion          | :red_square:   | :green_square: | :green_square: | :green_square:
-Pure Haskell           | :green_square: | :red_square:   | :green_square: | :green_square:
-Monadic                | :green_square: | :red_square:   | :red_square:   | :green_square:
-O(n^3) time worst-case | :red_square:   | :green_square: | :green_square: | :red_square:
-O(n) time worst-case   | :red_square:   | :green_square: | :red_square:   | :red_square:
-O(n) time possible     | :green_square: | :green_square: | :red_square:   | :green_square:
+No shift-reduce conflicts | ✅ | ❌ | ✅ | ✅
+Left-recusion             | ❌ | ✅ | ✅ | ✅
+Pure Haskell              | ✅ | ❌ | ✅ | ✅
+Monadic                   | ✅ | ❌ | ❌ | ✅
+O(n^3) time worst-case    | ❌ | ✅ | ✅ | ❌
+O(n) time worst-case      | ❌ | ✅ | ❌ | ❌
+O(n) time possible        | ✅ | ✅ | ❌ | ✅
