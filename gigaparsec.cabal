@@ -42,8 +42,13 @@ executable gpc-examples
     build-depends:    gigaparsec
 
 test-suite gpc-test
-  import:             common
-  type:               exitcode-stdio-1.0
-  hs-source-dirs:     tests
-  main-is:            test.hs
-  build-depends:      tasty, tasty-hunit, gigaparsec
+    import:           common
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   tests
+    main-is:          test.hs
+    build-depends:    tasty, tasty-hunit, gigaparsec
+
+executable gpc-experiment1
+    import:           common
+    main-is:          Experiment1.hs
+    hs-source-dirs:   experiments
