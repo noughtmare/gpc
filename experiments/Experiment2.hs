@@ -1,0 +1,172 @@
+-- {-# LANGUAGE DerivingVia #-}
+-- {-# LANGUAGE TemplateHaskellQuotes #-}
+-- {-# LANGUAGE BlockArguments #-}
+-- {-# LANGUAGE LambdaCase #-}
+-- {-# LANGUAGE QuantifiedConstraints #-}
+-- {-# OPTIONS_GHC -Wall #-}
+-- {-# LANGUAGE GADTs #-}
+-- import Control.Applicative
+-- import Control.Monad.State
+-- import Data.Char
+-- import Data.Kind
+-- import Data.Type.Equality
+-- import Data.Map.Strict (Map)
+-- import GHC.Exts (Any)
+-- import Data.Set (Set)
+-- import qualified Data.Map.Strict as Map
+-- import qualified Data.Set as Set
+-- import Unsafe.Coerce (unsafeCoerce)
+-- import Data.Maybe
+-- import Language.Haskell.TH (Name)
+-- import Data.Functor
+-- import Control.Arrow ((>>>))
+-- 
+-- type N :: Type -> Type
+-- newtype N a = N Name deriving (Eq, Ord, Show)
+-- 
+-- eqNT :: N a -> N b -> Maybe (a :~: b)
+-- eqNT (N x) (N y)
+--   | x == y = Just (unsafeCoerce Refl)
+--   | otherwise = Nothing
+-- 
+-- data NMap f = NM (Map (N Any) (f Any))
+-- lookupNM :: forall f a. N a -> NMap f -> Maybe (f a)
+-- lookupNM x (NM m) = unsafeCoerce (Map.lookup (unsafeCoerce x :: N Any) m)
+-- lookupNMM :: forall f a. Monoid (f a) => N a -> NMap f -> f a
+-- lookupNMM x nm = fromMaybe mempty (lookupNM x nm)
+-- insertNM :: forall f a. Monoid (f a) => N a -> f a -> NMap f -> NMap f
+-- insertNM n x (NM m) = NM (Map.insertWith (unsafeCoerce ((<>) :: f a -> f a -> f a)) (unsafeCoerce n :: N Any) (unsafeCoerce x :: f Any) m)
+-- sizeNM :: NMap f -> Int
+-- sizeNM (NM m) = Map.size m
+-- overwriteNM :: N a -> f a -> NMap f -> NMap f
+-- overwriteNM n x (NM m) = NM (Map.insert (unsafeCoerce n :: N Any) (unsafeCoerce x :: f Any) m)
+-- instance (forall a. Monoid (f a)) => Semigroup (NMap f) where
+--   NM x <> NM y = NM (Map.unionWith (<>) x y)
+-- instance (forall a. Monoid (f a)) => Monoid (NMap f) where
+--   mempty = NM Map.empty
+-- instance (forall a. Eq (f a)) => Eq (NMap f) where
+--   NM x == NM y = x == y
+-- 
+-- data NSet = NS (Set (N Any))
+-- memberNS :: N a -> NSet -> Bool
+-- memberNS n (NS s) = Set.member (unsafeCoerce n :: N Any) s
+-- insertNS :: N a -> NSet -> NSet
+-- insertNS n (NS s) = NS (Set.insert (unsafeCoerce n :: N Any) s)
+-- emptyNS :: NSet
+-- emptyNS = NS Set.empty
+
+-- For NT n p k, NT n' p' k', then n == n' ==> p == p'
+
+data P p a = P [P' p a] deriving Functor
+data P' p a = Pure a | Match Char (P a) | Free (p b) (P (b -> a))
+deriving instance Functor (P p)
+
+kajsldf
+
+-- char :: Char -> P Char
+-- char c = Match c (Pure c)
+-- 
+-- instance Applicative P where
+--   pure = Pure
+--   Pure f <*> k = fmap f k
+--   Match c p <*> k = Match c (p <*> k)
+--   Empty <*> _ = Empty
+--   Or p q <*> k = Or (p <*> k) (q <*> k)
+--   NT n p k <*> k' = NT n p (liftA2 flip k k')
+--   Var n k <*> k' = Var n (liftA2 flip k k')
+-- 
+-- instance Alternative P where
+--   empty = Empty
+--   p <|> q = Or p q
+-- 
+-- digit :: P Int
+-- digit = asum [n <$ char (intToDigit n) | n <- [0..9]]
+-- 
+-- parse :: P a -> String -> [(a, String)]
+-- parse p0 = go mempty (foise p0) where
+--   go :: NMap AnalysisResult -> P a -> String -> [(a, String)]
+--   go _ Empty _ = []
+--   go _ (Pure x) xs = [(x, xs)]
+--   go _ (Or p q) xs = parse p xs ++ parse q xs
+--   go _ (Match c k) (x:xs) | c == x = parse k xs
+--   go _ Match{} _ = []
+--   go _ (NT n p k) xs = 
+--     let
+--       m' = analyse n p
+--       AR _ l = lookupNMM n m'
+--     in
+--       parse ((p <**> chain (asum l)) <**> k) xs
+--   go _ Var{} _ = []
+-- 
+--   chain p = pure id <|> (>>>) <$> p <*> chain p
+-- 
+-- -- >>> parse digit "3"
+-- -- [(3,"")]
+-- 
+-- nt :: Name -> P a -> P a
+-- nt n p = NT (N n) p (Pure id)
+-- 
+-- foise :: P a -> P a
+-- foise = go emptyNS where
+--   go :: NSet -> P a -> P a
+--   go s (NT n p k)
+--     | n `memberNS` s = Var n k
+--     | otherwise = NT n (go (insertNS n s) p) (go s k)
+--   go _ (Pure x) = Pure x
+--   go _ Empty = Empty
+--   go s (Or p q) = Or (go s p) (go s q)
+--   go _ (Match c k) = Match c (go emptyNS k)
+--   go s (Var n k) = Var n (go s k)
+-- 
+-- data AnalysisResult a = AR [a] [P (a -> a)]
+-- instance Semigroup (AnalysisResult a) where
+--   AR a b <> AR c d = AR (a <> c) (b <> d)
+-- instance Monoid (AnalysisResult a) where
+--   mempty = AR [] []
+-- 
+-- analyse :: N a -> P a -> NMap AnalysisResult
+-- analyse = go mempty where
+--   go :: NMap AnalysisResult -> N a -> P a -> NMap AnalysisResult
+--   go m n (Pure x) = insertNM n (AR [x] []) m
+--   go m n (Or p q) = let m' = go m n p in go m' n q
+--   go m n (NT n' p k)
+--     | Just Refl <- eqNT n n' = insertNM n (AR [] [k]) m
+--     | otherwise =
+--       let
+--         m' = go m n' p
+--         AR e _ = lookupNMM n' m'
+--       in go m' n (asum (map pure e) <**> k)
+--   go m n (Var n' k)
+--     | Just Refl <- eqNT n n' = insertNM n (AR [] [k]) m
+--     | otherwise =
+--       let AR e _ = lookupNMM n' m
+--       in go m n (asum (map pure e) <**> k)
+--   go m _ Empty = m
+--   go m _ Match{} = m
+-- 
+-- number :: P Int
+-- number = nt 'number (digit <|> (\hd d -> hd * 10 + d) <$> number <*> digit)
+-- 
+-- number' :: P Int
+-- number' = nt 'number' (digit <|> (\hd d -> hd * 10 + d) <$> number <*> digit)
+-- 
+-- -- ndots :: P ()
+-- -- ndots = digit >>= nt 'ndots . go where
+-- --   go 0 = pure ()
+-- --   go n = char '.' *> go (n - 1)
+-- 
+-- data Nonterminal a where
+--   Number :: Nonterminal Int
+--   Expr   :: Nonterminal Int
+-- 
+-- data (:+:) f g a = L (f a) | R (g a)
+-- 
+-- number'' :: P Int
+-- number'' = go <*> digit where
+--   go = digit <**> go <|> pure 0 <&> \hd d -> hd * 10 + d
+-- 
+-- -- >>> parse number "1234"
+-- -- [(1,"234"),(12,"34"),(123,"4"),(1234,"")]
+-- 
+-- -- TODO: check equality of parsers invariant
+-- -- TODO: recursive nonterminals test case
