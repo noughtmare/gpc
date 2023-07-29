@@ -1,172 +1,150 @@
--- {-# LANGUAGE DerivingVia #-}
--- {-# LANGUAGE TemplateHaskellQuotes #-}
--- {-# LANGUAGE BlockArguments #-}
--- {-# LANGUAGE LambdaCase #-}
--- {-# LANGUAGE QuantifiedConstraints #-}
--- {-# OPTIONS_GHC -Wall #-}
--- {-# LANGUAGE GADTs #-}
--- import Control.Applicative
--- import Control.Monad.State
--- import Data.Char
--- import Data.Kind
--- import Data.Type.Equality
--- import Data.Map.Strict (Map)
--- import GHC.Exts (Any)
--- import Data.Set (Set)
--- import qualified Data.Map.Strict as Map
--- import qualified Data.Set as Set
--- import Unsafe.Coerce (unsafeCoerce)
--- import Data.Maybe
--- import Language.Haskell.TH (Name)
--- import Data.Functor
--- import Control.Arrow ((>>>))
--- 
--- type N :: Type -> Type
--- newtype N a = N Name deriving (Eq, Ord, Show)
--- 
--- eqNT :: N a -> N b -> Maybe (a :~: b)
--- eqNT (N x) (N y)
---   | x == y = Just (unsafeCoerce Refl)
---   | otherwise = Nothing
--- 
--- data NMap f = NM (Map (N Any) (f Any))
--- lookupNM :: forall f a. N a -> NMap f -> Maybe (f a)
--- lookupNM x (NM m) = unsafeCoerce (Map.lookup (unsafeCoerce x :: N Any) m)
--- lookupNMM :: forall f a. Monoid (f a) => N a -> NMap f -> f a
--- lookupNMM x nm = fromMaybe mempty (lookupNM x nm)
--- insertNM :: forall f a. Monoid (f a) => N a -> f a -> NMap f -> NMap f
--- insertNM n x (NM m) = NM (Map.insertWith (unsafeCoerce ((<>) :: f a -> f a -> f a)) (unsafeCoerce n :: N Any) (unsafeCoerce x :: f Any) m)
--- sizeNM :: NMap f -> Int
--- sizeNM (NM m) = Map.size m
--- overwriteNM :: N a -> f a -> NMap f -> NMap f
--- overwriteNM n x (NM m) = NM (Map.insert (unsafeCoerce n :: N Any) (unsafeCoerce x :: f Any) m)
--- instance (forall a. Monoid (f a)) => Semigroup (NMap f) where
---   NM x <> NM y = NM (Map.unionWith (<>) x y)
--- instance (forall a. Monoid (f a)) => Monoid (NMap f) where
---   mempty = NM Map.empty
--- instance (forall a. Eq (f a)) => Eq (NMap f) where
---   NM x == NM y = x == y
--- 
--- data NSet = NS (Set (N Any))
--- memberNS :: N a -> NSet -> Bool
--- memberNS n (NS s) = Set.member (unsafeCoerce n :: N Any) s
--- insertNS :: N a -> NSet -> NSet
--- insertNS n (NS s) = NS (Set.insert (unsafeCoerce n :: N Any) s)
--- emptyNS :: NSet
--- emptyNS = NS Set.empty
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
--- For NT n p k, NT n' p' k', then n == n' ==> p == p'
+import Control.Applicative
+import Data.Char
+import Data.Type.Equality
+-- import Debug.Trace
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Control.Monad
 
 data P p a = P [P' p a] deriving Functor
-data P' p a = Pure a | Match Char (P a) | Free (p b) (P (b -> a))
-deriving instance Functor (P p)
+deriving instance (forall x. Show (p x)) => Show (P p a)
 
-kajsldf
+instance Applicative (P p) where
+  pure x = P [Pure x]
+  P ps <*> q = asum (map (`go` q) ps) where
+    go (Pure f) k' = fmap f k'
+    go (Match c k) k' = P [Match c (k <*> k')]
+    go (Free x k) k' = P [Free x (flip <$> k <*> k')]
 
--- char :: Char -> P Char
--- char c = Match c (Pure c)
--- 
--- instance Applicative P where
---   pure = Pure
---   Pure f <*> k = fmap f k
---   Match c p <*> k = Match c (p <*> k)
---   Empty <*> _ = Empty
---   Or p q <*> k = Or (p <*> k) (q <*> k)
---   NT n p k <*> k' = NT n p (liftA2 flip k k')
---   Var n k <*> k' = Var n (liftA2 flip k k')
--- 
--- instance Alternative P where
---   empty = Empty
---   p <|> q = Or p q
--- 
--- digit :: P Int
--- digit = asum [n <$ char (intToDigit n) | n <- [0..9]]
--- 
--- parse :: P a -> String -> [(a, String)]
--- parse p0 = go mempty (foise p0) where
---   go :: NMap AnalysisResult -> P a -> String -> [(a, String)]
---   go _ Empty _ = []
---   go _ (Pure x) xs = [(x, xs)]
---   go _ (Or p q) xs = parse p xs ++ parse q xs
---   go _ (Match c k) (x:xs) | c == x = parse k xs
---   go _ Match{} _ = []
---   go _ (NT n p k) xs = 
---     let
---       m' = analyse n p
---       AR _ l = lookupNMM n m'
---     in
---       parse ((p <**> chain (asum l)) <**> k) xs
---   go _ Var{} _ = []
--- 
---   chain p = pure id <|> (>>>) <$> p <*> chain p
--- 
--- -- >>> parse digit "3"
--- -- [(3,"")]
--- 
--- nt :: Name -> P a -> P a
--- nt n p = NT (N n) p (Pure id)
--- 
--- foise :: P a -> P a
--- foise = go emptyNS where
---   go :: NSet -> P a -> P a
---   go s (NT n p k)
---     | n `memberNS` s = Var n k
---     | otherwise = NT n (go (insertNS n s) p) (go s k)
---   go _ (Pure x) = Pure x
---   go _ Empty = Empty
---   go s (Or p q) = Or (go s p) (go s q)
---   go _ (Match c k) = Match c (go emptyNS k)
---   go s (Var n k) = Var n (go s k)
--- 
--- data AnalysisResult a = AR [a] [P (a -> a)]
--- instance Semigroup (AnalysisResult a) where
---   AR a b <> AR c d = AR (a <> c) (b <> d)
--- instance Monoid (AnalysisResult a) where
---   mempty = AR [] []
--- 
--- analyse :: N a -> P a -> NMap AnalysisResult
--- analyse = go mempty where
---   go :: NMap AnalysisResult -> N a -> P a -> NMap AnalysisResult
---   go m n (Pure x) = insertNM n (AR [x] []) m
---   go m n (Or p q) = let m' = go m n p in go m' n q
---   go m n (NT n' p k)
---     | Just Refl <- eqNT n n' = insertNM n (AR [] [k]) m
---     | otherwise =
---       let
---         m' = go m n' p
---         AR e _ = lookupNMM n' m'
---       in go m' n (asum (map pure e) <**> k)
---   go m n (Var n' k)
---     | Just Refl <- eqNT n n' = insertNM n (AR [] [k]) m
---     | otherwise =
---       let AR e _ = lookupNMM n' m
---       in go m n (asum (map pure e) <**> k)
---   go m _ Empty = m
---   go m _ Match{} = m
--- 
--- number :: P Int
--- number = nt 'number (digit <|> (\hd d -> hd * 10 + d) <$> number <*> digit)
--- 
--- number' :: P Int
--- number' = nt 'number' (digit <|> (\hd d -> hd * 10 + d) <$> number <*> digit)
--- 
--- -- ndots :: P ()
--- -- ndots = digit >>= nt 'ndots . go where
--- --   go 0 = pure ()
--- --   go n = char '.' *> go (n - 1)
--- 
--- data Nonterminal a where
---   Number :: Nonterminal Int
---   Expr   :: Nonterminal Int
--- 
--- data (:+:) f g a = L (f a) | R (g a)
--- 
--- number'' :: P Int
--- number'' = go <*> digit where
---   go = digit <**> go <|> pure 0 <&> \hd d -> hd * 10 + d
--- 
--- -- >>> parse number "1234"
--- -- [(1,"234"),(12,"34"),(123,"4"),(1234,"")]
--- 
--- -- TODO: check equality of parsers invariant
--- -- TODO: recursive nonterminals test case
+instance Alternative (P p) where
+  empty = P []
+  P ps <|> P qs = P (ps ++ qs)
+
+data P' p a = Pure a | Match Char (P p a) | forall b. Free (p b) (P p (b -> a))
+deriving instance Functor (P' p)
+instance (forall x. Show (p x)) => Show (P' p a) where
+  show Pure{} = "Pure"
+  show (Match c k) = "Match " ++ show c ++ " (" ++ show k ++ ")"
+  show (Free x k) = "Free " ++ show x ++ " (" ++ show k ++ ")"
+
+char :: Char -> P p Char
+char c = P [Match c (pure c)]
+
+send :: p a -> P p a
+send x = P [Free x (pure id)]
+
+data SomeNT f = forall a. SomeNT (f a)
+instance G f => Eq (SomeNT f) where
+  SomeNT x == SomeNT y = case cmp x y of Equal{} -> True; _ -> False
+instance G f => Ord (SomeNT f) where
+  compare (SomeNT x) (SomeNT y) = case cmp x y of LessThan -> LT; Equal{} -> EQ; GreaterThan -> GT
+
+parse :: forall f a. (forall x. Show (f x), G f) => (forall x. f x -> P f x) -> f a -> String -> [(a, String)]
+parse g p0 xs0 = go mempty xs0 (g p0) where
+  go :: Set (SomeNT f) -> String -> P f b -> [(b, String)]
+--  go _ xs p | traceShow ("parse.go", xs, scry 0 p) False = undefined
+  go s xs (P ps) = go' s xs =<< ps
+  go' :: Set (SomeNT f) -> String -> P' f b -> [(b, String)]
+--   go' _ xs p | traceShow ("parse.go'", xs, scry' 0 p) False = undefined
+  go' _ xs (Pure x) = [(x, xs)]
+  go' _ (x:xs) (Match c k) | c == x = go mempty xs k
+  go' _ _ Match{} = []
+  go' s xs (Free x k) | SomeNT x `Set.notMember` s =
+    let
+      (_, l) = analysed x
+      extended = (g x <**> chain (asum l)) <**> k
+    in
+--      traceShow ("parse.go' Free", scry 5 extended) $ 
+        go (Set.insert (SomeNT x) s) xs extended
+  go' _ _ Free{} = []
+
+  analysed :: f b -> ([b], [P f (b -> b)])
+  analysed = analyse g
+
+  chain p = res where res = pure id <|> (flip (.)) <$> p <*> res
+
+data DOrdering a b = LessThan | Equal (a :~: b) | GreaterThan
+
+class (forall x. Ord (f x)) => G f where
+  cmp :: f a -> f b -> DOrdering a b
+
+analyse :: forall f a. (forall x. Show (f x), G f) => (forall x. f x -> P f x) -> f a -> ([a], [P f (a -> a)])
+analyse g x0 = go mempty (g x0) where
+  go :: Set (SomeNT f) -> P f b -> ([b], [P f (a -> b)])
+--  go _ p | traceShow ("analyse.go", scry 0 p) False = undefined
+  go s (P ps) = foldMap (go' s) ps
+
+  go' :: Set (SomeNT f) -> P' f b -> ([b], [P f (a -> b)])
+--  go' _ p | traceShow ("analyse.go'", scry' 0 p) False = undefined
+  go' _ (Pure x) = ([x], [])
+  go' s (Free x k)
+    | Equal Refl <- cmp x x0 = ([], [k])
+    | SomeNT x `Set.notMember` s = go (Set.insert (SomeNT x) s) (g x <**> k)
+    | otherwise = ([], [])
+  go' _ Match{} = ([], [])
+
+scry :: Int -> P f a -> P f a
+scry n0 (P xs) = P (map (scry' n0) xs) where
+
+scry' :: Int -> P' f a -> P' f a
+scry' _ (Pure x) = Pure x
+scry' 0 (Match c _) = Match c empty
+scry' n (Match c k) = Match c (scry (n - 1) k)
+scry' 0 (Free x _) = Free x empty
+scry' n (Free x k) = Free x (scry (n - 1) k)
+
+data Gram a where
+  Digit :: Gram Int
+  Number :: Gram Int
+deriving instance Eq (Gram a)
+deriving instance Ord (Gram a)
+deriving instance Show (Gram a)
+
+instance G Gram where
+  cmp Digit Digit = Equal Refl
+  cmp Digit Number = LessThan
+  cmp Number Number = Equal Refl
+  cmp Number Digit = GreaterThan
+
+gram :: Gram a -> P Gram a
+gram Digit = asum [n <$ char (intToDigit n) | n <- [0..9]]
+gram Number = send Digit <|> (\hd d -> hd * 10 + d) <$> send Number <*> send Digit
+
+-- >>> parse gram Number "314"
+
+data E a where
+  E :: Int -> Int -> E Expr
+deriving instance Eq (E a)
+deriving instance Ord (E a)
+deriving instance Show (E a)
+
+instance G E where
+  cmp (E a b) (E c d)
+    | a < c || a == c && b < d = LessThan
+    | a == c && b == d = Equal Refl
+    | otherwise = GreaterThan
+
+data Expr = Neg Expr | Mul Expr Expr | Add Expr Expr | ITE Expr Expr Expr | A
+  deriving Show
+
+string :: String -> P p String
+string (x:xs) = (:) <$> char x <*> string xs
+string [] = pure ""
+
+gramE :: E a -> P E a
+gramE (E l r) =
+      Neg <$ guard (4 >= l) <* char '-' <*> send (E l 4)
+  <|> Mul <$ guard (3 >= r && 3 >= l) <*> send (E 3 3) <* char '*' <*> send (E l 4)
+  <|> Add <$ guard (2 >= r && 2 >= l) <*> send (E 2 2) <* char '+' <*> send (E l 3)
+  <|> ITE <$ guard (1 >= l) <* string "if " <*> send (E 0 0) <* string " then " <*> send (E 0 0) <* string " else " <*> send (E 0 0)
+  <|> A <$ char 'a'
+
+-- >>> parse gramE (E 0 0) "if a+a then -a else a*a+a"
+-- [(ITE (Add A A) (Neg A) (Mul A A),"+a"),(ITE (Add A A) (Neg A) (Add (Mul A A) A),""),(ITE (Add A A) (Neg A) A,"*a+a")]
+
+main :: IO ()
+main = print $ parse gramE (E 0 0) "if a+a then -a else a*a+a"

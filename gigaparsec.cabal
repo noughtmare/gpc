@@ -57,3 +57,4 @@ executable gpc-experiment2
     import:           common
     main-is:          Experiment2.hs
     hs-source-dirs:   experiments
+    build-depends:    containers
