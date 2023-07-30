@@ -1,5 +1,73 @@
 {-# LANGUAGE GADTs #-}
 
+{-
+To deal with *left recursion*, we essentially transform the grammar
+following this general example:
+
+    X ::= X Y | Z    ==>    X ::= Z Y*    (1)
+
+Where Y* means repeating Y zero or more times. And note that any
+left-recursive nonterminal can be written in this form (if we allow an
+in-line disjuction operator or add more nonterminals), e.g.:
+
+    X ::= X + X | X - X | 0 | 1
+==>
+    X ::= X (+ X | - X) | (0 | 1)         (2)
+==> 
+    X ::= (0 | 1) (+ X | - X)*
+
+There are two main edge-cases: indirect left-recursion and empty
+productions. 
+
+We deal with *indirect left-recursion* using a combination of a static
+analysis, before parsing, and dynamic checks, during parsing. 
+
+* Statically, we recursively look through all nonterminals which are in
+  leftmost position to search for possible left-recursion. For each
+  left-recursive loop we find, we collect the continuation, e.g. Y in (1)
+  or + X and - X in (2).
+
+  This is done in the 'loops' function.
+
+* Dynamically, we prevent entering the same nonterminal twice by keeping
+  track of the visited nonterminals in a set. We clear the set whenever
+  the parser consumes an actual character.
+
+  This is done in the 'parse' function.
+
+As for *empty productions*, we don't deal with those yet. For now it is
+not that bad to avoid it manually. However, we do plan on resolving it
+before a 1.0 release. There seem to be two promising approaches:
+
+* Statically transform the grammar to factor out nonterminals which accept
+  the empty string. This could cause nonterminals to expand quadratically
+  if done naively, e.g.:
+
+      X  ::= X1  X2  X3  X4
+      X' ::= X1' X2  X3  X4
+           | X1  X2' X3  X4
+           | X1  X2  X3' X4
+           | X1  X2  X3  X4'
+
+  Where the primes indicate the non-empty variant of each nonterminal.
+   
+  It's also be possible to limit the blowup to be be linear if we add
+  more helper nonterminals, e.g.:
+     
+      X345 ::= X3 X45
+      X45  ::= X4 X5
+      X12  ::= X1 X2
+      X123 ::= X12 X3
+
+      X' ::= X1' X2 X345
+           | X1  X2' X345
+           | X12  X3' X45
+           | X123 X4' X5
+           | X123 X4 X5'
+
+* Dynamically enforce that input is consumed and bail out otherwise.
+-}
+
 import Control.Applicative
 import Data.Char
 import Data.Type.Equality
@@ -14,14 +82,12 @@ newtype P p a = P [P' p a] deriving Functor
 instance Applicative (P p) where
   pure x = P [Pure x]
   -- Note that the standard 'P ps <*> P qs = P [p <*> q | p <- ps, q <- qs]'
-  -- would **not** work because this would combine all the alternatives of
-  -- the second parser with the first parser. 
-  -- Essentially, that would mean we would have to choose an alternative
-  -- from the first parser **and** the second parser up front.
-  -- Instead, it is possible and better to postpone choosing the alternatives 
-  -- of the second parser.
-  -- In particular, the 'chain' combinator we use below depends on this
-  -- postponement.
+  -- would **not** work because this would combine all the alternatives of the
+  -- second parser with the first parser. Essentially, that would mean we would
+  -- have to choose an alternative from the first parser **and** the second
+  -- parser up front. Instead, it is possible and better to postpone choosing
+  -- the alternatives of the second parser. In particular, the 'chain'
+  -- combinator which we use further down depends on this postponement.
   P ps <*> q = asum (map (`go` q) ps) where
     go (Pure f) k' = fmap f k'
     go (Match c k) k' = P [Match c (k <*> k')]
@@ -43,24 +109,8 @@ send x = P [Free x (pure id)]
 parse :: forall f a. (GCompare f) => (forall x. f x -> P f x) -> f a -> String -> [a]
 parse g p0 xs0 = map fst $ filter ((== "") . snd) $ go mempty xs0 (g p0) where
 
-  -- We use the set 's :: Set (SomeNT f)' to avoid recursing into the same
-  -- nonterminal indefinitely, which would otherwise happen if the grammar
-  -- was left-recursive.  Of course that means we could miss those parses which
-  -- would require taking those loops. 
-
-  -- To account for those, we essentially transform following this general example:
-  -- X ::= X Y | Z
-  -- ==>
-  -- X ::= Z Y*
-  -- (where * means repeating zero or more times)
-  
-  -- More concretely, we analyse the grammar, simulating a single
-  -- left-recursive loop and record how parsing would continue after exiting
-  -- the loop at that point. Using the 'chain' combinator, we take this
-  -- continuation and run it zero or more times, thus simulating an arbitrary
-  -- number of left-recursive loops. We recover the missed parses by appending
-  -- this chained continuation to the body of each nonterminal we parse.
-
+  -- We use the set 's :: Set (Some f)' to avoid recursing into the same
+  -- nonterminal indefinitely.
   go :: Set (Some f) -> String -> P f b -> [(b, String)]
   go s xs (P ps) = go' s xs =<< ps
 
@@ -88,6 +138,10 @@ loops g x0 = go mempty (g x0) where
     | Some x `Set.notMember` s = go (Set.insert (Some x) s) (g x <**> k)
     -- TODO: what if 'x' accepts the empty string?
   go' _ _ = []
+
+--------------------------------------------------------------------------------
+-- Examples
+--------------------------------------------------------------------------------
 
 data Gram a where
   Digit :: Gram Int
