@@ -1,35 +1,38 @@
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE DefaultSignatures #-}
-{-# LANGUAGE QuantifiedConstraints #-}
 
 import Control.Applicative
 import Data.Char
 import Data.Type.Equality
--- import Debug.Trace
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad
+import Data.Some
+import Data.GADT.Compare
 
-data P p a = P [P' p a] deriving Functor
-deriving instance (forall x. Show (p x)) => Show (P p a)
+newtype P p a = P [P' p a] deriving Functor
 
 instance Applicative (P p) where
   pure x = P [Pure x]
+  -- Note that the standard 'P ps <*> P qs = P [p <*> q | p <- ps, q <- qs]'
+  -- would **not** work because this would combine all the alternatives of
+  -- the second parser with the first parser. 
+  -- Essentially, that would mean we would have to choose an alternative
+  -- from the first parser **and** the second parser up front.
+  -- Instead, it is possible and better to postpone choosing the alternatives 
+  -- of the second parser.
+  -- In particular, the 'chain' combinator we use below depends on this
+  -- postponement.
   P ps <*> q = asum (map (`go` q) ps) where
     go (Pure f) k' = fmap f k'
     go (Match c k) k' = P [Match c (k <*> k')]
     go (Free x k) k' = P [Free x (flip <$> k <*> k')]
 
 instance Alternative (P p) where
-  empty = P []
-  P ps <|> P qs = P (ps ++ qs)
+  empty = P empty
+  P ps <|> P qs = P (ps <|> qs)
 
 data P' p a = Pure a | Match Char (P p a) | forall b. Free (p b) (P p (b -> a))
 deriving instance Functor (P' p)
-instance (forall x. Show (p x)) => Show (P' p a) where
-  show Pure{} = "Pure"
-  show (Match c k) = "Match " ++ show c ++ " (" ++ show k ++ ")"
-  show (Free x k) = "Free " ++ show x ++ " (" ++ show k ++ ")"
 
 char :: Char -> P p Char
 char c = P [Match c (pure c)]
@@ -37,98 +40,94 @@ char c = P [Match c (pure c)]
 send :: p a -> P p a
 send x = P [Free x (pure id)]
 
-data SomeNT f = forall a. SomeNT (f a)
-instance G f => Eq (SomeNT f) where
-  SomeNT x == SomeNT y = case cmp x y of Equal{} -> True; _ -> False
-instance G f => Ord (SomeNT f) where
-  compare (SomeNT x) (SomeNT y) = case cmp x y of LessThan -> LT; Equal{} -> EQ; GreaterThan -> GT
+parse :: forall f a. (GCompare f) => (forall x. f x -> P f x) -> f a -> String -> [a]
+parse g p0 xs0 = map fst $ filter ((== "") . snd) $ go mempty xs0 (g p0) where
 
-parse :: forall f a. (forall x. Show (f x), G f) => (forall x. f x -> P f x) -> f a -> String -> [(a, String)]
-parse g p0 xs0 = go mempty xs0 (g p0) where
-  go :: Set (SomeNT f) -> String -> P f b -> [(b, String)]
---  go _ xs p | traceShow ("parse.go", xs, scry 0 p) False = undefined
+  -- We use the set 's :: Set (SomeNT f)' to avoid recursing into the same
+  -- nonterminal indefinitely, which would otherwise happen if the grammar
+  -- was left-recursive.  Of course that means we could miss those parses which
+  -- would require taking those loops. 
+
+  -- To account for those, we essentially transform following this general example:
+  -- X ::= X Y | Z
+  -- ==>
+  -- X ::= Z Y*
+  -- (where * means repeating zero or more times)
+  
+  -- More concretely, we analyse the grammar, simulating a single
+  -- left-recursive loop and record how parsing would continue after exiting
+  -- the loop at that point. Using the 'chain' combinator, we take this
+  -- continuation and run it zero or more times, thus simulating an arbitrary
+  -- number of left-recursive loops. We recover the missed parses by appending
+  -- this chained continuation to the body of each nonterminal we parse.
+
+  go :: Set (Some f) -> String -> P f b -> [(b, String)]
   go s xs (P ps) = go' s xs =<< ps
-  go' :: Set (SomeNT f) -> String -> P' f b -> [(b, String)]
---   go' _ xs p | traceShow ("parse.go'", xs, scry' 0 p) False = undefined
+
+  go' :: Set (Some f) -> String -> P' f b -> [(b, String)]
   go' _ xs (Pure x) = [(x, xs)]
   go' _ (x:xs) (Match c k) | c == x = go mempty xs k
-  go' _ _ Match{} = []
-  go' s xs (Free x k) | SomeNT x `Set.notMember` s =
-    let
-      (_, l) = analysed x
-      extended = (g x <**> chain (asum l)) <**> k
-    in
---      traceShow ("parse.go' Free", scry 5 extended) $ 
-        go (Set.insert (SomeNT x) s) xs extended
-  go' _ _ Free{} = []
-
-  analysed :: f b -> ([b], [P f (b -> b)])
-  analysed = analyse g
+  go' s xs (Free x k) | Some x `Set.notMember` s =
+    go (Set.insert (Some x) s) xs ((g x <**> chain (asum (loops g x))) <**> k)
+  go' _ _ _ = []
 
   chain p = res where res = pure id <|> (flip (.)) <$> p <*> res
+  -- TODO: what if 'p' accepts the empty string?
 
-data DOrdering a b = LessThan | Equal (a :~: b) | GreaterThan
-
-class (forall x. Ord (f x)) => G f where
-  cmp :: f a -> f b -> DOrdering a b
-
-analyse :: forall f a. (forall x. Show (f x), G f) => (forall x. f x -> P f x) -> f a -> ([a], [P f (a -> a)])
-analyse g x0 = go mempty (g x0) where
-  go :: Set (SomeNT f) -> P f b -> ([b], [P f (a -> b)])
---  go _ p | traceShow ("analyse.go", scry 0 p) False = undefined
+-- | Find left-recursive loops in the grammar definition
+-- For each such loop, return the parser fragment that we would enter after
+-- running one loop iteration and exiting the loop.
+loops :: forall f a. (GCompare f) => (forall x. f x -> P f x) -> f a -> [P f (a -> a)]
+loops g x0 = go mempty (g x0) where
+  go :: Set (Some f) -> P f b -> [P f (a -> b)]
   go s (P ps) = foldMap (go' s) ps
 
-  go' :: Set (SomeNT f) -> P' f b -> ([b], [P f (a -> b)])
---  go' _ p | traceShow ("analyse.go'", scry' 0 p) False = undefined
-  go' _ (Pure x) = ([x], [])
+  go' :: Set (Some f) -> P' f b -> [P f (a -> b)]
   go' s (Free x k)
-    | Equal Refl <- cmp x x0 = ([], [k])
-    | SomeNT x `Set.notMember` s = go (Set.insert (SomeNT x) s) (g x <**> k)
-    | otherwise = ([], [])
-  go' _ Match{} = ([], [])
-
-scry :: Int -> P f a -> P f a
-scry n0 (P xs) = P (map (scry' n0) xs) where
-
-scry' :: Int -> P' f a -> P' f a
-scry' _ (Pure x) = Pure x
-scry' 0 (Match c _) = Match c empty
-scry' n (Match c k) = Match c (scry (n - 1) k)
-scry' 0 (Free x _) = Free x empty
-scry' n (Free x k) = Free x (scry (n - 1) k)
+    | GEQ <- gcompare x x0 = [k]
+    | Some x `Set.notMember` s = go (Set.insert (Some x) s) (g x <**> k)
+    -- TODO: what if 'x' accepts the empty string?
+  go' _ _ = []
 
 data Gram a where
   Digit :: Gram Int
   Number :: Gram Int
-deriving instance Eq (Gram a)
-deriving instance Ord (Gram a)
 deriving instance Show (Gram a)
 
-instance G Gram where
-  cmp Digit Digit = Equal Refl
-  cmp Digit Number = LessThan
-  cmp Number Number = Equal Refl
-  cmp Number Digit = GreaterThan
+instance GEq Gram where
+  geq Digit Digit = Just Refl
+  geq Number Number = Just Refl
+  geq _ _ = Nothing
+
+instance GCompare Gram where
+  gcompare Digit Digit = GEQ
+  gcompare Digit Number = GLT
+  gcompare Number Number = GEQ
+  gcompare Number Digit = GGT
+
+-- >>> parse gram Number "314"
+-- [314]
 
 gram :: Gram a -> P Gram a
 gram Digit = asum [n <$ char (intToDigit n) | n <- [0..9]]
 gram Number = send Digit <|> (\hd d -> hd * 10 + d) <$> send Number <*> send Digit
 
--- >>> parse gram Number "314"
-
 data E a where
   E :: Int -> Int -> E Expr
-deriving instance Eq (E a)
-deriving instance Ord (E a)
 deriving instance Show (E a)
 
-instance G E where
-  cmp (E a b) (E c d)
-    | a < c || a == c && b < d = LessThan
-    | a == c && b == d = Equal Refl
-    | otherwise = GreaterThan
+instance GEq E where
+  geq (E a b) (E c d)
+    | a == c && b == d = Just Refl
+    | otherwise = Nothing
 
-data Expr = Neg Expr | Mul Expr Expr | Add Expr Expr | ITE Expr Expr Expr | A
+instance GCompare E where
+  gcompare (E a b) (E c d)
+    | a < c || a == c && b < d = GLT
+    | a == c && b == d = GEQ
+    | otherwise = GGT
+
+data Expr = Neg Expr | Expr :*: Expr | Expr :+: Expr | ITE Expr Expr Expr | A
   deriving Show
 
 string :: String -> P p String
@@ -137,14 +136,14 @@ string [] = pure ""
 
 gramE :: E a -> P E a
 gramE (E l r) =
-      Neg <$ guard (4 >= l) <* char '-' <*> send (E l 4)
-  <|> Mul <$ guard (3 >= r && 3 >= l) <*> send (E 3 3) <* char '*' <*> send (E l 4)
-  <|> Add <$ guard (2 >= r && 2 >= l) <*> send (E 2 2) <* char '+' <*> send (E l 3)
-  <|> ITE <$ guard (1 >= l) <* string "if " <*> send (E 0 0) <* string " then " <*> send (E 0 0) <* string " else " <*> send (E 0 0)
-  <|> A <$ char 'a'
+      Neg   <$ guard (4 >= l)           <*  char '-' <*> send (E l 4)
+  <|> (:*:) <$ guard (3 >= r && 3 >= l) <*> send (E 3 3) <* char '*' <*> send (E l 4)
+  <|> (:+:) <$ guard (2 >= r && 2 >= l) <*> send (E 2 2) <* char '+' <*> send (E l 3)
+  <|> ITE   <$ guard (1 >= l)           <*  string "if " <*> send (E 0 0) <* string " then " <*> send (E 0 0) <* string " else " <*> send (E 0 0)
+  <|> A     <$                              char 'a'
 
--- >>> parse gramE (E 0 0) "if a+a then -a else a*a+a"
--- [(ITE (Add A A) (Neg A) (Mul A A),"+a"),(ITE (Add A A) (Neg A) (Add (Mul A A) A),""),(ITE (Add A A) (Neg A) A,"*a+a")]
+-- >>> parse gramE (E 0 0) "if a+a then -a else a+a*-a+a"
+-- [ITE (A :+: A) (Neg A) ((A :+: (A :*: Neg A)) :+: A)]
 
 main :: IO ()
-main = print $ parse gramE (E 0 0) "if a+a then -a else a*a+a"
+main = print $ parse gramE (E 0 0) "if a+a then -a else a+a*-a+a"
