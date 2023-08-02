@@ -227,27 +227,51 @@ data E2 f a where
 
 type X :: ((Type -> Type) -> Type -> Type) -> (Type -> Type) -> Type -> Type
 data X g f a where
-  LeftAssoc :: f a -> X g f a
-  (:>>) :: f a -> f a -> X g f a
+  (:<*<) :: f (a -> b) -> f a -> X g f b
+  (:>|>) :: f a -> f a -> X g f a
   X :: g f a -> X g f a
 
-infixl 2 |>>
+infixl 2 >|>
 
-(|>>) :: P (X E2) a -> P (X E2) a -> P (X E2) a
-(|>>) x y = send (x :>> y)
+(>|>) :: P (X E2) a -> P (X E2) a -> P (X E2) a
+(>|>) x y = send (x :>|> y)
 
-left :: P (X E2) a -> P (X E2) a
-left x = send (LeftAssoc x)
+infixl 4 <*<
+
+(<*<) :: P (X E2) (a -> b) -> P (X E2) a -> P (X E2) b
+x <*< y = send (x :<*< y)
 
 instance (a ~ String) => IsString (P f a) where
   fromString = string
 
 gramE2 :: E2 (P (X E2)) Expr -> P (X E2) Expr
 gramE2 E2 = let e = send (X E2) in
-      left ((:*:) <$> e <* "*" <*> e)
-  |>> left ((:+:) <$> e <* "+" <*> e)
+      (:*:) <$> e <* "*" <*< e
+  >|> (:+:) <$> e <* "+" <*< e
   <|> "(" *> e <* ")"
   <|> A <$ "a"
+
+-- The desugaring to data dependent grammars should proceed like this:
+--
+-- E = ... X >|> Y ...
+-- ==>
+-- (E b) = ... (guard b *> X False) <|> Y True ...
+--
+-- E = ... X <*< Y ...
+-- ==>
+-- (E b)  = ... (guard b *> X True) <*> Y False ...
+--
+-- (If the same expression has multiple occurrences of >|> and <*<,
+-- then the booleans could be combined into an int as an optmization.)
+--
+-- The major remaining problem is that each occurrence of such a special
+-- disambiguation operator requires its own boolean. That's hard to do
+-- in a type-safe way. I could perhaps do something like Map Key Bool,
+-- but how can I identify these operators? Would I have to use observable
+-- sharing techniques again?
+--
+-- One option may be to identify these operators by the location in the
+-- free applicative at which they occur.
 
 type Y :: ((Type -> Type) -> Type -> Type) -> (Type -> Type) -> Type -> Type
 data Y g f a
