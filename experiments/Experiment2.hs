@@ -1,6 +1,8 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DerivingVia #-}
 
 {-
 To deal with *left recursion*, we essentially transform the grammar
@@ -15,14 +17,14 @@ in-line disjuction operator or add more nonterminals), e.g.:
     X ::= X + X | X - X | 0 | 1
 ==>
     X ::= X (+ X | - X) | (0 | 1)         (2)
-==> 
+==>
     X ::= (0 | 1) (+ X | - X)*
 
 There are two main edge-cases: indirect left-recursion and empty
-productions. 
+productions.
 
 We deal with *indirect left-recursion* using a combination of a static
-analysis, before parsing, and dynamic checks, during parsing. 
+analysis, before parsing, and dynamic checks, during parsing.
 
 * Statically, we recursively look through all nonterminals which are in
   leftmost position to search for possible left-recursion. For each
@@ -38,8 +40,9 @@ analysis, before parsing, and dynamic checks, during parsing.
   This is done in the 'parse' function.
 
 As for *empty productions*, we don't deal with those yet. For now it is
-not that bad to avoid it manually. However, we do plan on resolving it
-before a 1.0 release. There seem to be two promising approaches:
+not that bad to limit ourselves to non-empty productions  manually. However, we
+do plan on resolving it before a 1.0 release. There seem to be two promising
+approaches:
 
 * Statically transform the grammar to factor out nonterminals which accept
   the empty string. This could cause nonterminals to expand quadratically
@@ -52,10 +55,10 @@ before a 1.0 release. There seem to be two promising approaches:
           |  X1  X2  X3  X4'
 
   Where the primes indicate the non-empty variant of each nonterminal.
-   
+
   It's also be possible to limit the blowup to be be linear if we add
   more helper nonterminals, e.g.:
-     
+
       X2345 ::= X2 X345
       X345  ::= X3 X45
       X45   ::= X4 X5
@@ -84,84 +87,85 @@ import Data.Some
 import Data.GADT.Compare
 import Data.String
 import Data.Kind
+import Data.Functor.Identity
+import Control.Monad.State
+import Data.Map (Map)
+import Data.Map qualified as Map
+import Unsafe.Coerce (unsafeCoerce)
+import Data.Void
+import Data.Functor.Compose
+import Control.Monad.Writer
 
-newtype P f a = P [P' f a] deriving Functor
+newtype P t f a = P { alts :: t (P' f a) }
+  deriving (Functor, Applicative, Alternative) via Compose t (P' f)
 
-instance Applicative (P f) where
-  pure x = P [Pure x]
-  -- Note that the standard 'P ps <*> P qs = P [p <*> q | p <- ps, q <- qs]'
-  -- would **not** work because this would combine all the alternatives of the
-  -- second parser with the first parser. Essentially, that would mean we would
-  -- have to choose an alternative from the first parser **and** the second
-  -- parser up front. Instead, it is possible and better to postpone choosing
-  -- the alternatives of the second parser. In particular, the 'chain'
-  -- combinator which we use further down depends on this postponement.
-  P ps <*> q = asum (map (`go` q) ps) where
-    go (Pure f) k' = fmap f k'
-    go (Match c k) k' = P [Match c (k <*> k')]
-    go (Free x k) k' = P [Free x (flip <$> k <*> k')]
+traverseAlts :: (Traversable t, Applicative m) => (P' f a -> m (P' f' b)) -> P t f a -> m (P t f' b)
+traverseAlts f (P as) = P <$> traverse f as
 
-instance Alternative (P p) where
-  empty = P empty
-  P ps <|> P qs = P (ps <|> qs)
-
-data P' f a = Pure a | Match Char (P f a) | forall b. Free (f (P f) b) (P f (b -> a))
+data P' f a = Pure a | Match Char (P' f a) | forall b. Free (f b) (P' f (b -> a))
 deriving instance Functor (P' p)
 
-char :: Char -> P p Char
-char c = P [Match c (pure c)]
+instance Applicative (P' f) where
+  pure = Pure
+  Pure f <*> k' = fmap f k'
+  Match c k <*> k' = Match c (k <*> k')
+  Free x k <*> k' = Free x (flip <$> k <*> k')
 
-send :: f (P f) a -> P f a
-send x = P [Free x (pure id)]
+char :: Applicative t => Char -> P t p Char
+char c = P (pure (Match c (pure c)))
 
-parse :: forall f a. (GCompare (f (P f))) => (forall x. f (P f) x -> P f x) -> f (P f) a -> String -> [a]
-parse g p0 xs0 = map fst $ filter ((== "") . snd) $ go mempty xs0 (g p0) where
+send :: Applicative t => f a -> P t f a
+send x = P (pure (Free x (pure id)))
+
+parse :: forall f a. (GCompare f) => G [] f -> f a -> String -> [a]
+parse (G g) p0 xs0 = map fst $ filter ((== "") . snd) $ go p0 mempty xs0 (g p0) where
 
   -- We use the set 's :: Set (Some f)' to avoid recursing into the same
   -- nonterminal indefinitely.
-  go :: Set (Some (f (P f))) -> String -> P f b -> [(b, String)]
-  go s xs (P ps) = go' s xs =<< ps
+  go :: f b -> Set (Some f) -> String -> P [] f b -> [(b, String)]
+  go nt s xs (P ps) = go' nt s xs =<< ps
 
-  go' :: Set (Some (f (P f))) -> String -> P' f b -> [(b, String)]
-  go' _ xs (Pure x) = [(x, xs)]
-  go' _ (x:xs) (Match c k) | c == x = go mempty xs k
-  go' s xs (Free x k) | Some x `Set.notMember` s =
-    go (Set.insert (Some x) s) xs ((g x <**> chain (asum (loops g x))) <**> k)
-  go' _ _ _ = []
-
-  chain p = res where res = pure id <|> (flip (.)) <$> p <*> res
-  -- TODO: what if 'p' accepts the empty string?
+  go' :: f b -> Set (Some f) -> String -> P' f b -> [(b, String)]
+  go' nt s xs (Pure x) = (x, xs) : (go' nt s xs . fmap ($ x) =<< loops g nt)
+  -- TODO: what if 'nt' accepts the empty string?
+  go' nt _ (x:xs) (Match c k) | c == x = go' nt mempty xs k
+  go' nt s xs (Free x k) | Some x `Set.notMember` s = do
+    (x', xs') <- go x (Set.insert (Some x) s) xs (g x)
+    go' nt s xs' (($ x') <$> k)
+  go' _ _ _ _ = []
 
 -- | Find left-recursive loops in the grammar definition
 -- For each such loop, return the parser fragment that we would enter after
 -- running one loop iteration and exiting the loop.
-loops :: forall f a. (GCompare (f (P f))) => (forall x. f (P f) x -> P f x) -> f (P f) a -> [P f (a -> a)]
+loops :: forall f a. (GCompare f) => (forall x. f x -> P [] f x) -> f a -> [P' f (a -> a)]
 loops g x0 = go mempty (g x0) where
-  go :: Set (Some (f (P f))) -> P f b -> [P f (a -> b)]
+  go :: Set (Some f) -> P [] f b -> [P' f (a -> b)]
   go s (P ps) = foldMap (go' s) ps
 
-  go' :: Set (Some (f (P f))) -> P' f b -> [P f (a -> b)]
+  go' :: Set (Some f) -> P' f b -> [P' f (a -> b)]
   go' s (Free x k)
     | GEQ <- gcompare x x0 = [k]
-    | Some x `Set.notMember` s = go (Set.insert (Some x) s) (g x <**> k)
+    | Some x `Set.notMember` s = go (Set.insert (Some x) s) (g x <**> P [k])
     -- TODO: what if 'x' accepts the empty string?
   go' _ _ = []
+
+newtype G t f = G (forall x. f x -> P t f x)
 
 --------------------------------------------------------------------------------
 -- Examples
 --------------------------------------------------------------------------------
 
-data Gram f a where
-  Digit :: Gram f Int
-  Number :: Gram f Int
-deriving instance Show (Gram f a)
+data Gram a where
+  Digit :: Gram Int
+  Number :: Gram Int
+deriving instance Show (Gram a)
 
-instance GEq (Gram f) where
+instance GEq Gram where
   geq Digit Digit = Just Refl
   geq Number Number = Just Refl
   geq _ _ = Nothing
 
-instance GCompare (Gram f) where
+instance GCompare Gram where
   gcompare Digit Digit = GEQ
   gcompare Digit Number = GLT
   gcompare Number Number = GEQ
@@ -170,20 +174,20 @@ instance GCompare (Gram f) where
 -- >>> parse gram Number "314"
 -- [314]
 
-gram :: Gram (P Gram) a -> P Gram a
+gram :: Gram a -> P [] Gram a
 gram Digit = asum [n <$ char (intToDigit n) | n <- [0..9]]
 gram Number = send Digit <|> (\hd d -> hd * 10 + d) <$> send Number <*> send Digit
 
-data E f a where
-  E :: Int -> Int -> E f Expr
-deriving instance Show (E f a)
+data E a where
+  E :: Int -> Int -> E Expr
+deriving instance Show (E a)
 
-instance GEq (E f) where
+instance GEq E where
   geq (E a b) (E c d)
     | a == c && b == d = Just Refl
     | otherwise = Nothing
 
-instance GCompare (E f) where
+instance GCompare E where
   gcompare (E a b) (E c d)
     | a < c || a == c && b < d = GLT
     | a == c && b == d = GEQ
@@ -192,12 +196,12 @@ instance GCompare (E f) where
 data Expr = Neg Expr | Expr :*: Expr | Expr :+: Expr | ITE Expr Expr Expr | A
   deriving Show
 
-string :: String -> P p String
+string :: Applicative t => String -> P t p String
 string (x:xs) = (:) <$> char x <*> string xs
 string [] = pure ""
 
-gramE :: E (P E) a -> P E a
-gramE (E l r) =
+gramE :: (Alternative t, Applicative t) => G t E
+gramE = G $ \(E l r) ->
       Neg   <$ guard (4 >= l)           <*  char '-' <*> send (E l 4)
   <|> (:*:) <$ guard (3 >= r && 3 >= l) <*> send (E 3 3) <* char '*' <*> send (E l 4)
   <|> (:+:) <$ guard (2 >= r && 2 >= l) <*> send (E 2 2) <* char '+' <*> send (E l 3)
@@ -221,61 +225,144 @@ gramE (E l r) =
 --       |  '(' E(0) ')'
 --       |  a
 
-type E2 :: (Type -> Type) -> Type -> Type
-data E2 f a where
-  E2 :: E2 f Expr
+type E2 :: Type -> Type
+data E2 a where
+  E2 :: E2 Expr
+instance GEq E2 where
+  geq E2 E2 = Just Refl
+instance GCompare E2 where
+  gcompare E2 E2 = GEQ
 
-type X :: ((Type -> Type) -> Type -> Type) -> (Type -> Type) -> Type -> Type
-data X g f a where
-  (:<*<) :: f (a -> b) -> f a -> X g f b
-  (:>|>) :: f a -> f a -> X g f a
-  X :: g f a -> X g f a
+data Assoc = BothAssoc | LeftAssoc | RightAssoc | NoneAssoc
+
+-- Assoc forms a lattice like this:
+--
+--      None
+--      /   \
+--   Left   Right
+--      \   /
+--      Both
+
+instance Semigroup Assoc where
+  BothAssoc <> x = x
+  x <> BothAssoc = x
+  LeftAssoc <> LeftAssoc = LeftAssoc
+  RightAssoc <> RightAssoc = RightAssoc
+  _ <> _ = NoneAssoc
+instance Monoid Assoc where
+  mempty = BothAssoc
+newtype X a = X [[(a, Assoc)]]
+  deriving (Functor, Applicative) via Compose [] (Compose [] (Writer Assoc))
+instance Alternative X where
+  empty = X [[]]
+  X xs0 <|> X ys0 = X (go xs0 ys0) where
+    -- appends the last element of xs with the first element of ys
+    go [] ys = ys
+    go xs [] = xs
+    go [x] (y:ys) = (x ++ y) : ys
+    go (x:xs) ys = x : go xs ys
 
 infixl 2 >|>
 
-(>|>) :: P (X E2) a -> P (X E2) a -> P (X E2) a
-(>|>) x y = send (x :>|> y)
+(>|>) :: P X f a -> P X f a -> P X f a
+(>|>) (P (X xs)) (P (X ys)) = P (X (xs ++ ys))
 
-infixl 4 <*<
+left :: P X f a -> P X f a
+left (P (X xs)) = P (X (getCompose (fmap (\(x,_) -> (x, LeftAssoc)) (Compose xs))))
 
-(<*<) :: P (X E2) (a -> b) -> P (X E2) a -> P (X E2) b
-x <*< y = send (x :<*< y)
+-- (<*<) :: P X E2 (a -> b) -> P X E2 a -> P X E2 b
+-- x <*< y = send (x :<*< y)
 
-instance (a ~ String) => IsString (P f a) where
+instance (Applicative t, a ~ String) => IsString (P t f a) where
   fromString = string
 
-gramE2 :: E2 (P (X E2)) Expr -> P (X E2) Expr
-gramE2 E2 = let e = send (X E2) in
-      (:*:) <$> e <* "*" <*< e
-  >|> (:+:) <$> e <* "+" <*< e
+gramE2 :: G X E2
+gramE2 = G $ \E2 -> let e = send E2 in
+      left ((:*:) <$> e <* "*" <*> e)
+  >|> left ((:+:) <$> e <* "+" <*> e)
   <|> "(" *> e <* ")"
   <|> A <$ "a"
 
--- The desugaring to data dependent grammars should proceed like this:
+-- -- The desugaring to data dependent grammars should proceed like this:
+-- --
+-- -- E = ... X >|> Y ...
+-- -- ==>
+-- -- (E b) = ... (guard b *> X False) <|> Y True ...
+-- --
+-- -- E = ... X <*< Y ...
+-- -- ==>
+-- -- (E b)  = ... (guard b *> X True) <*> Y False ...
+-- --
+-- -- (If the same expression has multiple occurrences of >|> and <*<,
+-- -- then the booleans could be combined into an int as an optmization.)
+-- --
+-- -- The major remaining problem is that each occurrence of such a special
+-- -- disambiguation operator requires its own boolean. That's hard to do
+-- -- in a type-safe way. I could perhaps do something like Map Key Bool,
+-- -- but how can I identify these operators? Would I have to use observable
+-- -- sharing techniques again?
+-- --
+-- -- One option may be to identify these operators by the location in the
+-- -- free applicative at which they occur.
 --
--- E = ... X >|> Y ...
--- ==>
--- (E b) = ... (guard b *> X False) <|> Y True ...
+-- -- I want to try creating a new nonterminal for each occurrence of these
+-- -- operators. Then each can be individually guarded. Each occurrence can be
+-- -- identified by its ordinal.
 --
--- E = ... X <*< Y ...
--- ==>
--- (E b)  = ... (guard b *> X True) <*> Y False ...
+-- type Y :: (Type -> Type) -> (Type -> Type) -> Type -> Type
+-- data Y f m a where
+--   Y :: f a -> Y f m a
+--   Y' :: Int -> Bool -> Y f m a
+-- instance GEq f => GEq (Y f m) where
+--   geq (Y x) (Y y) = geq x y
+--   geq (Y' i0 b0) (Y' i1 b1) = if i0 == i1 && b0 == b1 then Just (unsafeCoerce Refl) else Nothing
+--   geq _ _ = Nothing
+-- instance GCompare f => GCompare (Y f m) where
+--   gcompare (Y x) (Y y) = gcompare x y
+--   gcompare (Y' i0 b0) (Y' i1 b1) =
+--     case compare i0 i1 <> compare b0 b1 of
+--       LT -> GLT
+--       EQ -> unsafeCoerce GEQ
+--       GT -> GGT
+--   gcompare Y{} Y'{} = GLT
+--   gcompare Y'{} Y{} = GGT
 --
--- (If the same expression has multiple occurrences of >|> and <*<,
--- then the booleans could be combined into an int as an optmization.)
 --
--- The major remaining problem is that each occurrence of such a special
--- disambiguation operator requires its own boolean. That's hard to do
--- in a type-safe way. I could perhaps do something like Map Key Bool,
--- but how can I identify these operators? Would I have to use observable
--- sharing techniques again?
 --
--- One option may be to identify these operators by the location in the
--- free applicative at which they occur.
-
-type Y :: ((Type -> Type) -> Type -> Type) -> (Type -> Type) -> Type -> Type
-data Y g f a
-
--- TODO: Does this need some sort of Distributive?
--- desugar :: (forall x. f (P (X f)) x -> P (X f) x) -> Y f (P (Y f)) a -> P (Y f) a
--- desugar = _
+-- bla :: P' (X f) a -> State (Int, Map Int (Some (P (Y f)))) (P' (Y f) a)
+-- bla (Pure x) = pure (Pure x)
+-- bla (Match c k) = Match c <$> traverseAlts bla k
+-- bla (Free (X op) k) = Free (Y op) <$> traverseAlts bla k
+-- bla (Free (x :<*< y) k) = do
+--   x' <- traverseAlts bla x
+--   y' <- traverseAlts bla y
+--   (i, m) <- get
+--   put (i + 1, Map.insert i (Some (x' <*> y')) m)
+--   Free (Y' i True) <$> traverseAlts bla k
+-- bla (Free (x :>|> y) k) = do
+--   x' <- traverseAlts bla x
+--   y' <- traverseAlts bla y
+--   (i, m) <- get
+--   put (i + 1, Map.insert i (Some (x' <|> y')) m)
+--   Free (Y' i True) <$> traverseAlts bla k
+--
+-- class Funny f where
+--   fun :: Applicative m => (forall x. P t f x -> m (P t f' x)) -> G t f -> m (G t f)
+--
+-- instance Funny E2 where
+--   fun f (G g) = (\x -> G $ \E2 -> x) <$> f (g E2)
+--
+-- fun' :: (Funny f, Applicative m) => (forall x. P' t f x -> m (P' t f' x)) -> G t f -> m (G f')
+-- fun' f g = fun (traverseAlts f) g
+--
+-- desugar :: Funny f => G f (X f) -> G (Y f m) (Y f)
+-- desugar g = let (G g', (_, m)) = runState (fun' bla g) (0, Map.empty) in G $ \case
+--   Y x -> g' x
+--   Y' i b -> guard b *> case m Map.! i of Some x -> unsafeCoerce x
+--
+-- example :: [Expr]
+-- example = parse (desugar gramE2) (Y E2) "1+2*3"
+--
+-- -- >>> example
+-- -- []
+--

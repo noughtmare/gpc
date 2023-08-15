@@ -33,7 +33,7 @@ library
     import:           common
     exposed-modules:  Gigaparsec, Gigaparsec.Core
     hs-source-dirs:   src
-    build-depends:    mtl, template-haskell        
+    build-depends:    mtl, template-haskell
 
 executable gpc-examples
     import:           common
@@ -57,4 +57,11 @@ executable gpc-experiment2
     import:           common
     main-is:          Experiment2.hs
     hs-source-dirs:   experiments
-    build-depends:    containers, some
+    build-depends:    containers, some, mtl
+
+executable gpc-experiment3
+    import:           common
+    main-is:          Experiment3.hs
+    hs-source-dirs:   experiments
+    build-depends:    containers, some, mtl, tasty-bench-fit, deepseq, text
+
