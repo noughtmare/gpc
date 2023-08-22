@@ -8,6 +8,8 @@ import Data.IntSet qualified as IntSet
 import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IntMap
 import Debug.Trace
+import Data.Function
+import Data.Bifunctor
 
 data CFG = CFG String [(String, [[Symbol]])]
 
@@ -16,22 +18,24 @@ data Symbol = T Char | NT String
 (!) :: Eq k => [(k, v)] -> k -> v
 xs ! x = case lookup x xs of Just y -> y
 
-lfpFrom :: Eq t => t -> (t -> t) -> t
-lfpFrom x0 f = go (0 :: Int) x0 where
+lfpFrom :: (t -> t -> Bool) -> t -> (t -> t) -> t
+lfpFrom eqT x0 f = go (0 :: Int) x0 where
   go n _ | traceShow n False = undefined
-  go n x = let y = f x in if x == y then x else go (n + 1) y
+  go n x = let y = f x in if eqT x y then x else go (n + 1) y
 
 type Table = [(String, IntMap IntSet)]
+type ToDos = [(String, Int)]
+
 
 denoteCFG :: CFG -> Text -> IntSet
 denoteCFG (CFG start g) xs = m ! start IntMap.! 0
   where
     m :: Table
     m =
-      lfpFrom
+      lfpFrom ((==) `on` (map (second (IntMap.map IntSet.size))))
         [(nt, IntMap.fromList [(i, IntSet.empty) | i <- [0.. Text.length xs]]) | nt <- nts]
         ( \m' ->
-            [ (nt, IntMap.fromList [(i, IntSet.unions $ map (\p -> denoteProd xs p m' i) (g ! nt)) | i <- [0 .. Text.length xs]])
+            [ (nt, IntMap.fromList [(i, foldMap (\p -> denoteProd xs p m' i) (g ! nt)) | i <- [0 .. Text.length xs]])
             | nt <- nts
             ]
         )
@@ -54,9 +58,14 @@ denoteSymbol _ (NT nt) m i = m ! nt IntMap.! i
 example :: CFG
 example = CFG "E" [("E", [[NT "E", T '+', NT "E"], [T 'a']])]
 
+example2 = CFG "N" [("N", [[NT "N", T 'a'], [T 'a']])]
+example3 = CFG "N" [("N", [[T 'a', NT "N"], []])]
+
 main :: IO ()
-main = print $ denoteCFG example (Text.pack ('a' : concat (replicate 1000 "+a")))
+-- main = print $ denoteCFG example (Text.pack ('a' : concat (replicate 1000 "+a")))
 -- main = print =<< fit (mkFitConfig (\n -> denoteCFG example (Text.pack ('a' : concat (replicate (fromIntegral n) "+a")))) (0, 500))
+main = print $ denoteCFG example3 (Text.replicate 100 (Text.pack "a"))
+-- main = print =<< fit (mkFitConfig (\n -> denoteCFG example3 (Text.replicate (fromIntegral n) (Text.pack "a"))) (0, 1000))
 
 
 
