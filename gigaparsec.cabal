@@ -65,3 +65,8 @@ executable gpc-experiment3
     hs-source-dirs:   experiments
     build-depends:    containers, some, mtl, tasty-bench-fit, deepseq, text
 
+executable gpc-experiment4
+    import:           common
+    main-is:          Experiment4.hs
+    hs-source-dirs:   experiments
+    build-depends:    containers, some, mtl, tasty-bench-fit, deepseq, text
