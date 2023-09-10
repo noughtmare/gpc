@@ -16,8 +16,8 @@ Feature                    | (atto/mega)parsec  | happy (LALR)       | Earley   
 No shift-reduce conflicts  | :heavy_check_mark: | :x:                | :heavy_check_mark: | :heavy_check_mark:
 Left-recusion              | :x:                | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:
 Pure Haskell               | :heavy_check_mark: | :x:                | :heavy_check_mark: | :heavy_check_mark:
-Monadic                    | :heavy_check_mark: | :x:                | :x:                | :heavy_check_mark:
-polynomial time worst-case | :x:                | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:
-linear time worst-case     | :x:                | :heavy_check_mark: | :x:                | :x:
-linear time possible       | :heavy_check_mark: | :heavy_check_mark: | :x:                | :heavy_check_mark:
-disambiguation annotations | :x:                | :x:                | :x:                | planned
+Monadic interface          | :heavy_check_mark: | :x:                | :x:                | :heavy_check_mark:
+Polynomial time worst-case | :x:                | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:
+Linear time worst-case     | :x:                | :heavy_check_mark: | :x:                | :x:
+Linear time possible       | :heavy_check_mark: | :heavy_check_mark: | :x:                | :heavy_check_mark:
+Disambiguation annotations | :x:                | :x:                | :x:                | planned
