@@ -1,108 +1,210 @@
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE ExplicitNamespaces #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE LambdaCase #-}
+{-# OPTIONS_GHC -Wall #-}
 
-module Gigaparsec.Core where
+module Gigaparsec.Core (CFG (CFG), RHS, Result, t, nt, parse, emptyk') where
 
-import Control.Monad.State
+import Data.Map.Strict (Map)
+-- import Data.Set (Set)
 import Control.Applicative
-import Data.Type.Equality ( type (:~:)(Refl) )
-import Data.Bifunctor (first)
-import Unsafe.Coerce ( unsafeCoerce )
-import qualified Debug.Trace
-import Language.Haskell.TH (Name)
+import Control.Monad
+import Data.Map.Strict qualified as Map
+-- import GHC.Base (Any)
+import Debug.Trace
+import Data.Text qualified as Text
+import Data.Text (Text)
 
-traceShow _ = id
+import Data.Some
+import Data.GADT.Compare
 
-type Id a = Name
-newtype Parser a = Parser { alts :: [P a] } deriving Functor
-data P a = T Char (Parser a) | forall b. NT (Id b) (Parser b) (b -> Parser a) | Success a
-deriving instance Functor P
+import Data.Functor.Identity
+import Data.Bifunctor
+import Unsafe.Coerce (unsafeCoerce)
+import Data.GADT.Show
+import Data.Type.Equality
 
-char :: Char -> Parser ()
-char c = Parser [T c (pure ())]
+data RHS f a = Pure a | T Char (RHS f a) | forall x. NT (f x) (x -> RHS f a) | Or (RHS f a) (RHS f a) | Fail
+deriving instance Functor (RHS f)
 
-pattern (::=) :: Name -> Parser a -> Parser a
-pattern name ::= p <- (error "'::=' cannot be used in a pattern." -> (name, p)) where
-  (::=) = \name p -> Parser [NT name p (\x -> Parser [Success x])]
-infix 1 ::= -- tighter than $ but looser than <|>
+instance Applicative (RHS f) where
+  pure = Pure
+  (<*>) = ap
 
-instance Applicative Parser where
-  pure x = Parser [Success x]
-  Parser ps <*> q0 = asum $ fmap (`seqP` q0) ps where
-    seqP (T c p) q = Parser [T c (p <*> q)]
-    seqP (NT n p p') q = Parser [NT n p (\x -> p' x <*> q)]
-    seqP (Success f) q = f <$> q
+instance Alternative (RHS f) where
+  (<|>) = Or
+  empty = Fail
 
-instance Alternative Parser where
-  empty = Parser []
-  Parser ps <|> Parser qs = Parser (ps <> qs)
+instance Monad (RHS f) where
+  Pure x >>= k = k x
+  T c k >>= k' = T c (k >>= k')
+  NT f k >>= k' = NT f (k >=> k')
+  Or p q >>= k = Or (p >>= k) (q >>= k)
+  Fail >>= _ = Fail
 
-instance Monad Parser where
-  Parser xs >>= k0 = Parser (xs >>= go (alts . k0)) where
-    go :: (a -> [P b]) -> P a -> [P b]
-    go k (Success x) = k x
-    go k (T c p) = [T c (Parser (concatMap (go k) (alts p)))]
-    go k (NT n p q) = [NT n p (Parser . concatMap (go k) . alts . q)]
+data CFG f a = CFG (f a) (forall x. f x -> RHS f x)
 
-data SelfCont a = forall b. SelfCont (Stack b a) (a -> Parser b)
+data T3 a b c = T3 !a !b !c deriving Show
 
-data Stack a b where
-  SNil :: Stack a a
-  SCons :: Id a -> Int -> [SelfCont a] -> (a -> Parser b) -> Stack b c -> Stack a c
+data Comm f = Comm !(Some f) !Int deriving (Eq, Ord, Show)
 
-eqId :: Id a -> Id b -> Maybe (a :~: b)
-eqId x y
-  | x == y = Just (unsafeCoerce Refl)
-  | otherwise = Nothing
+newtype Cont f a = Cont { getCont :: Text -> Descr -> a -> Command f }
+-- instance Show (Cont f a) where
+--   show _ = "<Cont>"
 
-unwind :: forall a b c. Id b -> Int -> Stack a c -> Maybe (Stack a b, Stack b c)
-unwind _ _ SNil = Nothing
-unwind n i (SCons n' i' dcs k s) =
-  case eqId @a @b n n' of
-    Just Refl | i == i' -> Just (SNil, SCons n' i' dcs k s)
-    _ -> first (SCons n' i' dcs k) <$> unwind n i s
+data Descr = Descr Slot !Int !Int
+data Slot = Slot -- String [Symbol] [Symbol]
+  deriving Show
 
-appendStack :: Stack a b -> Stack b c -> Stack a c
-appendStack SNil x = x
-appendStack (SCons n i ks k stack') stack'' = SCons n i ks k (appendStack stack' stack'')
+newtype Rel a b = Rel (Map a [b]) deriving Show
 
-update :: ([SelfCont a] -> [SelfCont a]) -> Stack a b -> Stack a b
-update f (SCons n i q q' s) = SCons n i (f q) q' s
-update _ SNil = error "Cannot update SNil"
+rel :: Ord a => Rel a b -> a -> [b]
+rel (Rel m) x = Map.findWithDefault [] x m
 
-parse :: forall a. Parser a -> String -> [a]
-parse p0 xs0 = evalState (parse' 0 xs0 p0) SNil where
-  parse' :: Int -> String -> Parser b -> State (Stack b c) [c]
-  parse' i xs = fmap concat . traverse (go i xs) . alts
+relMay :: Ord a => Rel a b -> a -> Maybe [b]
+relMay (Rel m) x = Map.lookup x m
 
-  go :: forall b c. Int -> String -> P b -> State (Stack b c) [c]
-  go i (:){} (T c _) | traceShow ("t/match", c, i) False = undefined
-  go i (x:xs) (T c p) | x == c = parse' (i + 1) xs p
-  go i [] (T c _) | traceShow ("t/fail", c, i) False = undefined
-  go _ _ T{} = pure []
+initRel :: Ord a => a -> Rel a b -> Rel a b
+initRel x (Rel m) = Rel (Map.insertWith (++) x [] m)
 
-  go i xs (NT n p p') = state $ \s -> 
-    -- Find out if the current (n, i) combination is already on the stack
-    case unwind n i s of
-      -- If not, push a new empty continuation on the initial stack (stack0) and continue running
-      Nothing | traceShow ("nt/nothing", n, i) False -> undefined
-      Nothing -> let (x, s') = runState (parse' i xs p) (SCons n i [] p' s) in (x, maybe undefined snd (unwind n i s'))
-      -- If so, add the p' as a new continuation, fail the current branch, and do update the stack
-      Just{} | traceShow ("nt/just", n, i) False -> undefined
-      Just (stack0, stack1) -> 
-        ([], appendStack stack0 (update (SelfCont stack0 p' :) stack1))
+addRel :: Ord a => a -> b -> Rel a b -> Rel a b
+addRel x y (Rel m) = Rel (Map.insertWith (++) x [y] m)
 
-  go i xs (Success x) = state $ \stack ->
-    case stack of
-      -- If there's something on the stack we can either:
-      -- use it to continue parsing, or ignore it and pop it from the stack
-      SCons{} | traceShow ("success/scons", i) False -> undefined
-      SCons _ _ ks p' stack' -> 
-        ( evalState (parse' i xs (p' x)) stack'
-          ++ concat [evalState (parse' i xs (p x)) (appendStack s stack) | SelfCont s p <- ks]
-        , stack)
-      -- If there's nothing on the stack then we succeed iff there is also no remaining input
-      SNil | traceShow ("success/snil", i) False -> undefined
-      SNil -> ([x | null xs], stack)
+relSize :: Rel a b -> Int
+relSize (Rel m) = Map.size m
+
+-- instance GShow Identity where
+--   gshowsPrec _ _ = showString "<Identity>"
+-- instance GShow (Cont f) where
+--   gshowsPrec _ _ = showString "<Cont>"
+
+-- newtype U = U (Set Descr)
+newtype G f = G { getG :: Rel (Comm f) (Slot, Int, Some (Cont f)) } -- deriving Show
+newtype P f = P { getP :: Rel (Comm f) (Int, Some Identity) } -- deriving Show
+
+newtype Command f = Command { getCommand :: forall x. T3 (G f) (P f) (Result x) -> T3 (G f) (P f) (Result x) }
+
+newtype M f a = M { getM :: Text -> Descr -> Cont f a -> Command f }
+
+extents :: (GCompare f) => f a -> M f (Maybe [(Int, a)])
+extents nt = M $ \inp dsc@(Descr _ _ i) (Cont k) ->
+  Command $ \(T3 g p b) -> trace ("extents " ++ show i) $
+  getCommand
+    (k inp dsc (
+      let res = relMay (getP p) (Comm (Some nt) i)
+      in fmap (map (second (\(Some (Identity x)) -> unsafeCoerce x))) res))
+    (T3 g (P (initRel (Comm (Some nt) i) (getP p))) b)
+
+addExtent :: GCompare f => f a -> a -> M f ()
+addExtent nt x = M $ \inp dsc@(Descr _ l i) (Cont k) ->
+  Command $ \(T3 g p b) -> -- trace ("addExtent " ++ show (nt, l, i)) $
+  getCommand (k inp dsc ()) (T3 g (P (addRel (Comm (Some nt) l) (i, Some (Identity x)) (getP p))) b)
+
+resume :: GCompare f => f a -> a -> M f a
+resume nt x = M $ \inp (Descr Slot l r) _ ->
+  Command $ \(T3 g p b) -> 
+    -- if l == r then trace ("resume " ++ show (l, r)) $ T3 g p b else
+    let cnts = rel (getG g) (Comm (Some nt) l) in
+    foldr (\(s, l', Some (Cont k)) go -> go . getCommand (unsafeCoerce k inp (Descr s l' r) x))
+      id cnts (T3 g p b)
+
+addCont :: GCompare f => f a -> M f c -> M f c
+addCont nt m = M $ \inp dsc@(Descr s l i) k ->
+  Command $ \(T3 g p b) -> -- trace ("addCont " ++ show (nt, i)) $
+    getCommand (getM m inp dsc k) (T3 (G (addRel (Comm (Some nt) i) (s, l, Some k) (getG g))) p b)
+
+match :: Char -> M f ()
+match c = M $ \inp (Descr (Slot {- nt alpha beta -}) l i) (Cont k) ->
+  case Text.uncons inp of
+    Just (x,inp') | c == x -> k inp' (Descr (Slot {- nt alpha beta -}) l (i + 1)) ()
+    _ -> Command id
+
+skip :: Int -> M f ()
+skip r = M $ \inp (Descr s l i) (Cont k) -> k (Text.drop (r - i) inp) (Descr s l r) ()
+
+descend :: M f ()
+descend = M $ \inp (Descr Slot _ i) (Cont k) -> k inp (Descr Slot i i) ()
+
+traceI :: String -> M f ()
+traceI msg = M $ \inp dsc@(Descr _ _ i) k -> trace (show i ++ ": " ++ msg) getCont k inp dsc ()
+
+instance Functor (M f) where
+  fmap f (M p) = M $ \inp dsc (Cont k) ->
+    p inp dsc $ Cont $ \inp' dsc' x ->
+      k inp' dsc' (f x)
+instance Applicative (M f) where
+  pure x = M $ \inp dsc (Cont k) -> k inp dsc x
+  (<*>) = ap
+instance Alternative (M f) where
+  empty = M $ \_ _ _ -> Command id
+  M p <|> M q = M $ \inp dsc k -> Command (getCommand (q inp dsc k) . getCommand (p inp dsc k))
+instance Monad (M f) where
+  M p >>= k = M $ \inp dsc k' ->
+    p inp dsc $ Cont $ \inp' dsc' x ->
+      getM (k x) inp' dsc' k'
+
+-- must have Alternative instance
+type Result = []
+
+parse :: forall f a. GCompare f => CFG f a -> Text -> Result a
+parse (CFG nt0 prods) inp0 = res where
+
+  T3 _ _ res =
+    getCommand
+      (getM (parseRHS (NT nt0 pure)) inp0 (Descr Slot 0 0) finish)
+      (T3 (G (Rel mempty)) (P (Rel mempty)) empty)
+
+  finish :: Cont f a
+  finish = Cont $ \inp _ x -> Command $ \(T3 p g b) -> (T3 p g (b <|> unsafeCoerce x <$ guard (Text.null inp)))
+
+  parseRHS :: RHS f x -> M f x
+  parseRHS (Pure x) = pure x
+  parseRHS (T c k) = parseT c *> parseRHS k
+  parseRHS (NT f k) = parseNT f >>= parseRHS . k
+  parseRHS (Or p q) = parseRHS p <|> parseRHS q
+  parseRHS Fail = empty
+
+  parseNT :: f x -> M f x
+  parseNT nt = 
+    -- if we ever finish parsing nt then resume after this point
+    addCont nt $
+      -- check if we have already finished parsing this
+      extents nt >>= \case
+        -- if not,
+        Nothing -> do
+          traceI "Nothing"
+          -- descend into nt
+          descend
+          traceI "Nothing descend"
+          -- parse its right hand side
+          x <- parseRHS (prods nt)
+          traceI "Nothing parseRHS"
+          -- remember that we've parsed it (and to what point int the input)
+          addExtent nt x
+          error "Nothing addExtent"
+          -- resume parsing the stored continuations
+          x' <- resume nt x
+          traceI "Nothing resume"
+          pure x'
+        -- if so,
+        Just rs -> do
+          traceI "Just"
+          -- for all successes, skip forward and continue parsing
+          asum (map (\(r, x) -> x <$ skip r) rs)
+
+  parseT :: Char -> M f ()
+  parseT = match
+
+t :: Char -> RHS f ()
+t c = T c (pure ())
+
+nt :: f a -> RHS f a
+nt f = NT f pure
+
+data E a where E :: E ()
+deriving instance Eq (E a)
+deriving instance Ord (E a)
+instance GEq E where geq E E = Just Refl
+instance GCompare E where gcompare E E = GEQ
+
+emptyk' :: CFG E ()
+emptyk' = CFG E $ \E -> nt E <|> pure ()

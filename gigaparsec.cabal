@@ -25,7 +25,7 @@ source-repository head
     location: https://github.com/noughtmare/gigaparsec
 
 common common
-    build-depends:    base >= 4.14 && <5
+    build-depends:    base >= 4.14 && <5, containers, text, some
     ghc-options:      -Wall
     default-language: GHC2021
 
@@ -33,7 +33,6 @@ library
     import:           common
     exposed-modules:  Gigaparsec, Gigaparsec.Core
     hs-source-dirs:   src
-    build-depends:    mtl, template-haskell
 
 executable gpc-examples
     import:           common
@@ -53,9 +52,9 @@ executable gpc-experiment1
     main-is:          Experiment1.hs
     hs-source-dirs:   experiments
 
-executable gpc-experiment2
+library gpc-experiment2
     import:           common
-    main-is:          Experiment2.hs
+    exposed-modules:  Experiment2
     hs-source-dirs:   experiments
     build-depends:    containers, some, mtl
 
@@ -65,8 +64,8 @@ executable gpc-experiment3
     hs-source-dirs:   experiments
     build-depends:    containers, some, mtl, tasty-bench-fit, deepseq, text
 
-executable gpc-experiment4
-    import:           common
-    main-is:          Experiment4.hs
-    hs-source-dirs:   experiments
-    build-depends:    containers, some, mtl, tasty-bench-fit, deepseq, text
+-- executable gpc-experiment4
+--     import:           common
+--     main-is:          Experiment4.hs
+--     hs-source-dirs:   experiments
+--     build-depends:    containers, some, mtl, tasty-bench-fit, deepseq, text
