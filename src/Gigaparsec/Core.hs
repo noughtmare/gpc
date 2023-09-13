@@ -87,7 +87,7 @@ newtype M f a = M { getM :: Text -> Descr -> Cont f a -> Command f }
 
 extents :: (GCompare f) => f a -> M f (Maybe [(Int, a)])
 extents nt = M $ \inp dsc@(Descr _ _ i) (Cont k) ->
-  Command $ \(T3 g p b) -> trace ("extents " ++ show i) $
+  Command $ \(T3 g p b) -> -- trace ("extents " ++ show i) $
   getCommand
     (k inp dsc (
       let res = relMay (getP p) (Comm (Some nt) i)
@@ -101,8 +101,8 @@ addExtent nt x = M $ \inp dsc@(Descr _ l i) (Cont k) ->
 
 resume :: GCompare f => f a -> a -> M f a
 resume nt x = M $ \inp (Descr Slot l r) _ ->
-  Command $ \(T3 g p b) -> 
-    -- if l == r then trace ("resume " ++ show (l, r)) $ T3 g p b else
+  Command $ \(T3 g p b) -> -- trace ("resume " ++ show (l, r)) $ 
+    -- if l == r then T3 g p b else
     let cnts = rel (getG g) (Comm (Some nt) l) in
     foldr (\(s, l', Some (Cont k)) go -> go . getCommand (unsafeCoerce k inp (Descr s l' r) x))
       id cnts (T3 g p b)
@@ -127,6 +127,9 @@ descend = M $ \inp (Descr Slot _ i) (Cont k) -> k inp (Descr Slot i i) ()
 traceI :: String -> M f ()
 traceI msg = M $ \inp dsc@(Descr _ _ i) k -> trace (show i ++ ": " ++ msg) getCont k inp dsc ()
 
+traceCmd :: String -> M f ()
+traceCmd msg = M $ \inp dsc@(Descr _ _ i) k -> Command $ \(T3 g p b) -> getCommand (getCont k inp dsc ()) $ trace (show i ++ ": " ++ msg) (T3 g p b)
+
 instance Functor (M f) where
   fmap f (M p) = M $ \inp dsc (Cont k) ->
     p inp dsc $ Cont $ \inp' dsc' x ->
@@ -145,6 +148,13 @@ instance Monad (M f) where
 -- must have Alternative instance
 type Result = []
 
+showOne :: RHS f x -> String
+showOne Pure{} = "Pure"
+showOne (T c _) = "(T " ++ show c ++ ")"
+showOne (NT _ _) = "NT"
+showOne (Or _ _) = "Or"
+showOne Fail = "Fail"
+
 parse :: forall f a. GCompare f => CFG f a -> Text -> Result a
 parse (CFG nt0 prods) inp0 = res where
 
@@ -154,9 +164,12 @@ parse (CFG nt0 prods) inp0 = res where
       (T3 (G (Rel mempty)) (P (Rel mempty)) empty)
 
   finish :: Cont f a
-  finish = Cont $ \inp _ x -> Command $ \(T3 p g b) -> (T3 p g (b <|> unsafeCoerce x <$ guard (Text.null inp)))
+  finish = Cont $ \inp _ x -> Command $ \(T3 p g b) -> 
+    -- trace "finish" $
+      T3 p g (b <|> unsafeCoerce x <$ guard (Text.null inp))
 
   parseRHS :: RHS f x -> M f x
+  -- parseRHS x | trace ("parseRHS " ++ showOne x) False = undefined
   parseRHS (Pure x) = pure x
   parseRHS (T c k) = parseT c *> parseRHS k
   parseRHS (NT f k) = parseNT f >>= parseRHS . k
@@ -171,23 +184,23 @@ parse (CFG nt0 prods) inp0 = res where
       extents nt >>= \case
         -- if not,
         Nothing -> do
-          traceI "Nothing"
+          -- traceCmd "Nothing"
           -- descend into nt
           descend
-          traceI "Nothing descend"
+          -- traceCmd "Nothing descend"
           -- parse its right hand side
           x <- parseRHS (prods nt)
-          traceI "Nothing parseRHS"
+          -- traceCmd "Nothing parseRHS"
           -- remember that we've parsed it (and to what point int the input)
           addExtent nt x
-          error "Nothing addExtent"
+          -- traceCmd "Nothing addExtent"
           -- resume parsing the stored continuations
           x' <- resume nt x
-          traceI "Nothing resume"
+          -- traceCmd "Nothing resume"
           pure x'
         -- if so,
         Just rs -> do
-          traceI "Just"
+          -- traceCmd ("Just " ++ show (length rs))
           -- for all successes, skip forward and continue parsing
           asum (map (\(r, x) -> x <$ skip r) rs)
 
